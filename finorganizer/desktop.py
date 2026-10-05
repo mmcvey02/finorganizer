@@ -1,7 +1,7 @@
 """Desktop app: FinOrganizer in its own native window (no browser).
 
 Uses pywebview, which embeds the system web engine (Microsoft Edge WebView2 on
-Windows) in a normal application window. The local server runs in a background
+Windows, WebKit on macOS) in a normal application window. The local server runs in a background
 thread, bound to 127.0.0.1 only. Closing the main window stops the server,
 closes the database and ends the process.
 
@@ -32,6 +32,11 @@ def _message_box(title, text, error=False):
     if os.name == "nt":
         import ctypes
         ctypes.windll.user32.MessageBoxW(None, text, title, 0x10 if error else 0x40)
+    elif sys.platform == "darwin":
+        import subprocess
+        quote = lambda t: '"%s"' % t.replace("\\", "\\\\").replace('"', '\\"')  # noqa: E731
+        subprocess.run(["osascript", "-e", "display dialog %s with title %s buttons {\"OK\"} with icon %s"
+                        % (quote(text), quote(title), "stop" if error else "note")], check=False)
     else:
         print("%s: %s" % (title, text), file=sys.stderr)
 
@@ -183,11 +188,12 @@ def main(argv=None):
             where = "\n\nDetails were saved to:\n" + _log_path(args.db)
         except OSError:
             where = ""
-        _message_box(APP_NAME, "FinOrganizer couldn't start its window.\n\n%s%s\n\n"
-                               "On Windows this usually means the Microsoft Edge WebView2 Runtime is "
-                               "missing; install it from Microsoft, or use FinOrganizer-cli.exe, "
-                               "which opens the app in your browser."
-                     % (details.strip().splitlines()[-1], where), error=True)
+        advice = ("On Windows this usually means the Microsoft Edge WebView2 Runtime is missing; "
+                  "install it from Microsoft, or use FinOrganizer-cli.exe, which opens the app in "
+                  "your browser." if os.name == "nt" else
+                  "Please send the details file to whoever maintains your copy of FinOrganizer.")
+        _message_box(APP_NAME, "FinOrganizer couldn't start its window.\n\n%s%s\n\n%s"
+                     % (details.strip().splitlines()[-1], where, advice), error=True)
         code = 1
     # Make sure no background thread (web engine, server) keeps the process alive.
     if sys.stdout:

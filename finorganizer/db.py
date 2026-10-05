@@ -7,6 +7,7 @@ ISO-8601 strings (YYYY-MM-DD), months are YYYY-MM.
 
 import os
 import sqlite3
+import sys
 
 def _default_db_path():
     if os.environ.get("FINORGANIZER_DB"):
@@ -16,7 +17,13 @@ def _default_db_path():
         folder = os.path.join(os.environ["APPDATA"], "FinOrganizer")
         os.makedirs(folder, exist_ok=True)
         return os.path.join(folder, "finorganizer.db")
-    return os.path.join(os.path.expanduser("~"), ".finorganizer.db")
+    legacy = os.path.join(os.path.expanduser("~"), ".finorganizer.db")
+    if sys.platform == "darwin" and not os.path.exists(legacy):
+        # macOS: the standard per-user app data folder (an existing ~/.finorganizer.db keeps working).
+        folder = os.path.join(os.path.expanduser("~"), "Library", "Application Support", "FinOrganizer")
+        os.makedirs(folder, exist_ok=True)
+        return os.path.join(folder, "finorganizer.db")
+    return legacy
 
 
 DEFAULT_DB_PATH = _default_db_path()

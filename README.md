@@ -27,7 +27,7 @@ Back up your data by copying that file.
 
 ## Windows app
 
-GitHub Actions builds two Windows programs on every push (`.github/workflows/windows-exe.yml`).
+GitHub Actions builds the Windows programs and the Mac app on every push (`.github/workflows/build.yml`).
 Neither needs Python installed.
 
 | Program | What it is |
@@ -59,6 +59,31 @@ python packaging/build_exe.py      # output: dist\FinOrganizer.exe and dist\FinO
 
 Running from source, the desktop window is `pip install pywebview` then
 `python -m finorganizer.desktop` (or `pip install .[desktop]` and run `finorganizer-desktop`).
+
+## Mac app
+
+The same desktop app is built for macOS as a disk image, in two versions:
+
+| File | For |
+|---|---|
+| `FinOrganizer-mac-apple-silicon.dmg` | Macs with an M1, M2, M3, M4 or later chip (Apple menu → About This Mac shows "Chip: Apple M…") |
+| `FinOrganizer-mac-intel.dmg` | Older Macs with an Intel processor |
+
+- **Install:** download the right `.dmg` from the
+  [latest release](https://github.com/mmcvey02/finorganizer/releases/latest), open it, and drag
+  **FinOrganizer** onto **Applications**.
+- **First launch:** the app isn't notarized by Apple (that requires a paid Apple Developer
+  account), so macOS blocks it the first time. Open it once, click **Done** on the warning, then go
+  to **System Settings → Privacy & Security**, scroll down and click **Open Anyway** next to the
+  FinOrganizer message. After that it opens normally.
+- **Closing the window** (or Cmd+Q) quits FinOrganizer completely.
+- **Your data** lives in `~/Library/Application Support/FinOrganizer/`. Copy that folder to back it up.
+- **Updates:** the app tells you when a new version is out; download the new `.dmg` and drag it
+  into Applications again, replacing the old copy. Your data is kept. (Installing updates
+  automatically is Windows-only for now.)
+
+To build it yourself on a Mac: `pip install pyinstaller pywebview`,
+`python packaging/build_exe.py`, then `packaging/make_dmg.sh dist/FinOrganizer.dmg`.
 
 ## Profiles, printing and bank connections
 
