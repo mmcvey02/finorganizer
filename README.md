@@ -37,7 +37,7 @@ Neither needs Python installed.
 
 - **Download:** get `FinOrganizer.exe` (and optionally `FinOrganizer-cli.exe`) from the
   [latest release](https://github.com/mmcvey02/finorganizer/releases/latest). Every build of the
-  main branch is published there automatically as version 1.1.*build number*.
+  main branch is published there automatically as version 1.2.*build number*.
 - **Updates:** the app checks for a newer release when it opens (switch this off under
   ⚙ Settings) and shows a banner. **Update now** downloads the new version, verifies it against
   GitHub's checksum, swaps it in and restarts. Your data, profiles and bank connections are
