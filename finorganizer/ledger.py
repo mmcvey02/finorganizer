@@ -162,13 +162,20 @@ def find_category(conn, ref, create_kind=None):
 # ----------------------------------------------------------------- transactions
 
 def add_transaction(conn, account_id, date, amount_cents, payee="", category_id=None,
-                    memo="", cleared=False, commit=True):
+                    memo="", cleared=False, commit=True, categorizer=None, auto_categorize=True):
+    """Record a transaction. Without a category, one is guessed when possible (see
+    categorize.py); pass ``categorizer`` to reuse one across a batch."""
     date = parse_date(date).isoformat()
     get_account(conn, account_id)
+    auto = 0
+    if category_id is None and auto_categorize and (payee or memo):
+        from .categorize import Categorizer
+        category_id = (categorizer or Categorizer(conn)).guess(payee, memo, int(amount_cents))
+        auto = int(category_id is not None)
     cur = conn.execute(
-        "INSERT INTO transactions (account_id, date, amount_cents, payee, category_id, memo, cleared)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (account_id, date, int(amount_cents), payee or "", category_id, memo or "", int(bool(cleared))),
+        "INSERT INTO transactions (account_id, date, amount_cents, payee, category_id, memo, cleared,"
+        " auto_category) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (account_id, date, int(amount_cents), payee or "", category_id, memo or "", int(bool(cleared)), auto),
     )
     if commit:
         conn.commit()
@@ -240,8 +247,11 @@ def update_transaction(conn, tx_id, **fields):
     if "date" in fields:
         fields["date"] = parse_date(fields["date"]).isoformat()
     tx = get_transaction(conn, tx_id)
+    if "category_id" in fields:
+        fields["auto_category"] = 0  # chosen (or confirmed) by you
     _update(conn, "transactions", tx_id, fields,
-            {"account_id", "date", "amount_cents", "payee", "category_id", "memo", "cleared"})
+            {"account_id", "date", "amount_cents", "payee", "category_id", "memo", "cleared",
+             "auto_category"})
     # Keep the other side of a transfer in sync on date / amount.
     if tx["transfer_id"]:
         mirror = {}

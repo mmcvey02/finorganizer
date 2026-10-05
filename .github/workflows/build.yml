@@ -85,6 +85,10 @@ jobs:
           if ($q.ExitCode -ne 0) { Write-Error "updated program failed"; exit 1 }
           Start-Sleep -Seconds 2
           if (Test-Path "$dir\FinOrganizer.exe.old") { Write-Error "leftover .old not cleaned up"; exit 1 }
+          $archive = Join-Path $env:APPDATA "FinOrganizer\previous-versions"
+          $kept = Get-ChildItem $archive -Filter "FinOrganizer-*.exe" -ErrorAction SilentlyContinue
+          if (-not $kept) { Write-Error "previous build was not moved into $archive"; exit 1 }
+          Write-Host "previous build kept as $($kept.FullName)"
           Write-Host "self-update swap OK"
 
       - uses: actions/upload-artifact@v4
@@ -162,6 +166,8 @@ jobs:
           wait $pid || { echo "::error::updated app failed"; exit 1; }
           sleep 2
           test ! -e "$apps/.FinOrganizer.app.old" || { echo "::error::leftover old copy not cleaned up"; exit 1; }
+          archive="$HOME/Library/Application Support/FinOrganizer/previous-versions"
+          ls -d "$archive"/FinOrganizer-*.app || { echo "::error::previous build was not moved into $archive"; exit 1; }
           echo "self-update with real hdiutil/ditto/codesign OK"
 
       - uses: actions/upload-artifact@v4

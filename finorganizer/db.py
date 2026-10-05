@@ -149,6 +149,8 @@ CREATE TABLE IF NOT EXISTS remote_accounts (
 MIGRATIONS = [
     ("transactions", "external_id", "ALTER TABLE transactions ADD COLUMN external_id TEXT"),
     ("recurring", "anchor_day", "ALTER TABLE recurring ADD COLUMN anchor_day INTEGER"),
+    # 1 = category was guessed automatically (shown as "auto"; never used to learn from)
+    ("transactions", "auto_category", "ALTER TABLE transactions ADD COLUMN auto_category INTEGER NOT NULL DEFAULT 0"),
 ]
 
 DEFAULT_CATEGORIES = [

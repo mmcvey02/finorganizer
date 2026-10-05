@@ -166,6 +166,7 @@ def _install_windows(info, exe_path=None):
 
     new_path = exe_path + ".new"
     _download(assets[main_name], new_path)
+    _note_replaced_version()
     _swap_file(new_path, exe_path)
 
     cli = os.path.join(folder, "FinOrganizer-cli.exe")
@@ -273,6 +274,7 @@ def _install_mac(info, exe_path=None):
     dmg = os.path.join(folder, name)
     try:
         _download(asset, dmg)
+        _note_replaced_version()
         _install_mac_from_dmg(dmg, bundle)
     finally:
         import shutil
@@ -306,14 +308,52 @@ def leftovers(exe_path=None):
     return [exe_path + ".old", exe_path + ".new", exe_path + ".new.part"]
 
 
+def archive_dir():
+    """Where the build replaced by the last update is kept: inside the app's data folder
+    (%APPDATA%\\FinOrganizer\\previous-versions, ~/Library/Application Support/FinOrganizer/...)."""
+    from . import db
+    return os.path.join(os.path.dirname(os.path.abspath(db.DEFAULT_DB_PATH)), "previous-versions")
+
+
+def _note_replaced_version():
+    """Remember which version is being replaced, to name the archived copy."""
+    try:
+        os.makedirs(archive_dir(), exist_ok=True)
+        with open(os.path.join(archive_dir(), ".replaced-version"), "w") as f:
+            f.write(current_version())
+    except OSError:
+        pass
+
+
 def cleanup_old(exe_path=None):
-    """Remove the previous version left behind by an update."""
+    """Tidy up after an update: move the replaced build into the data folder's
+    previous-versions folder (keeping only the most recent one, for rollback) and
+    delete unfinished downloads. Safe to call at every start."""
     import shutil
+    folder = archive_dir()
+    marker = os.path.join(folder, ".replaced-version")
     for leftover in leftovers(exe_path):
+        if not os.path.exists(leftover):
+            continue
         try:
-            if os.path.isdir(leftover):
+            if leftover.endswith(".old"):
+                try:
+                    with open(marker) as f:
+                        version = re.sub(r"[^0-9A-Za-z.\-]", "", f.read().strip()) or "previous"
+                except OSError:
+                    version = "previous"
+                ext = ".app" if os.path.isdir(leftover) else ".exe"
+                os.makedirs(folder, exist_ok=True)
+                for older in os.listdir(folder):  # keep just one previous version
+                    path = os.path.join(folder, older)
+                    if older.startswith("FinOrganizer-"):
+                        shutil.rmtree(path) if os.path.isdir(path) else os.remove(path)
+                shutil.move(leftover, os.path.join(folder, "FinOrganizer-%s%s" % (version, ext)))
+                if os.path.exists(marker):
+                    os.remove(marker)
+            elif os.path.isdir(leftover):
                 shutil.rmtree(leftover)
-            elif os.path.exists(leftover):
+            else:
                 os.remove(leftover)
         except OSError:
-            pass
+            pass  # still in use (the old version may be exiting); the next start retries

@@ -51,6 +51,10 @@ class FakeMacTools:
 class MacUpdateTests(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp()
+        self.archive = os.path.join(self.dir, "Application Support", "FinOrganizer", "previous-versions")
+        patcher = mock.patch.object(updater, "archive_dir", lambda: self.archive)
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.apps = os.path.join(self.dir, "Applications")
         self.bundle = os.path.join(self.apps, "FinOrganizer.app")
         make_app(self.bundle, "v1")
@@ -76,6 +80,8 @@ class MacUpdateTests(unittest.TestCase):
             updater.cleanup_old(exe)
         self.assertFalse(os.path.exists(old))
         self.assertEqual(sorted(os.listdir(self.apps)), ["FinOrganizer.app"])
+        # The old app now sits in the data folder instead of hidden in Applications.
+        self.assertEqual(read_marker(os.path.join(self.archive, "FinOrganizer-previous.app")), "v1")
 
     def test_bad_signature_leaves_the_installed_app_alone(self):
         with self.assertRaisesRegex(updater.UpdateError, "codesign"):

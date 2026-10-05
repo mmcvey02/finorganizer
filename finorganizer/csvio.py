@@ -5,6 +5,7 @@ import datetime as dt
 import io
 
 from .ledger import add_transaction, find_category, list_transactions
+from .categorize import Categorizer
 from .money import to_cents
 
 DATE_FORMATS = ("%Y-%m-%d", "%m/%d/%Y", "%m/%d/%y", "%d/%m/%Y", "%Y/%m/%d", "%d.%m.%Y",
@@ -55,16 +56,6 @@ def _field(rec, mapping, key):
     return (rec.get(col) or "").strip() if col else ""
 
 
-def _payee_category_map(conn):
-    """Most recent category used for each payee, to auto-categorise imports."""
-    out = {}
-    for r in conn.execute(
-            "SELECT LOWER(payee), category_id FROM transactions"
-            " WHERE category_id IS NOT NULL AND payee != '' ORDER BY date, id"):
-        out[r[0]] = r[1]
-    return out
-
-
 def import_csv(conn, account_id, text, invert=False, day_first=False, skip_duplicates=True):
     """Import transactions from CSV ``text`` into an account.
 
@@ -73,7 +64,7 @@ def import_csv(conn, account_id, text, invert=False, day_first=False, skip_dupli
     """
     reader = csv.DictReader(io.StringIO(text.lstrip("﻿")))
     mapping = _map_columns(reader.fieldnames or [])
-    learned = _payee_category_map(conn)
+    categorizer = Categorizer(conn)
     existing = set()
     if skip_duplicates:
         for r in conn.execute("SELECT date, amount_cents, LOWER(payee) FROM transactions"
@@ -94,17 +85,17 @@ def import_csv(conn, account_id, text, invert=False, day_first=False, skip_dupli
             payee = _field(rec, mapping, "payee")
             memo = _field(rec, mapping, "memo")
             cat_name = _field(rec, mapping, "category")
+            category_id = None
             if cat_name:
                 category_id = find_category(
                     conn, cat_name, create_kind="income" if amount > 0 else "expense")["id"]
-            else:
-                category_id = learned.get(payee.lower())
             key = (date.isoformat(), amount, payee.lower())
             if key in existing:
                 duplicates += 1
                 continue
             existing.add(key)
-            add_transaction(conn, account_id, date, amount, payee, category_id, memo, commit=False)
+            add_transaction(conn, account_id, date, amount, payee, category_id, memo, commit=False,
+                            categorizer=categorizer)
             imported += 1
         except (ValueError, KeyError, LookupError) as e:
             errors.append("line %d: %s" % (lineno, e))

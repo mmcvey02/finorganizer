@@ -381,7 +381,10 @@ async function editTransaction(tx, defaults = {}) {
   const body = { account_id: Number(v.account_id), date: v.date, amount_cents: cents, payee: v.payee,
                  category_id: v.category_id || null, memo: v.memo, cleared: v.cleared ? 1 : 0 };
   if (isNew) await attempt(() => api("POST", "/api/transactions", body), "Transaction added");
-  else await attempt(() => api("PUT", `/api/transactions/${tx.id}`, body), "Transaction updated");
+  else {
+    const r = await attempt(() => api("PUT", `/api/transactions/${tx.id}`, body));
+    toast(r.similar_updated ? `Transaction updated; category also applied to ${r.similar_updated} similar` : "Transaction updated");
+  }
 }
 
 async function newTransfer() {
@@ -425,6 +428,7 @@ pages.transactions = async (params) => {
     <div class="page-head"><h1>Transactions</h1>
       ${conns.length ? `<span class="muted small">Banks synced ${lastSync ? esc(lastSync.replace("T", " ").slice(0, 16)) : "never"}</span>
         <button class="ghost sync-banks" id="tx-sync">Sync banks</button>` : ""}
+      <button class="ghost" id="autocat" title="Fill in categories for uncategorized transactions">Auto-categorize</button>
       <button class="ghost" id="import">Import CSV</button>
       <a class="btn ghost" style="background:transparent;color:var(--text-2);border-color:var(--border);text-decoration:none" href="/api/export.csv${f.start ? `?start=${f.start}&end=${f.end || ""}` : ""}">Export CSV</a>
       <button class="ghost" id="transfer">Transfer</button>
@@ -448,7 +452,7 @@ pages.transactions = async (params) => {
           <td>${esc(t.date)}</td>
           <td>${esc(t.payee)}${t.external_id ? ' <span class="pill info" title="Downloaded from your bank">bank</span>' : ""}${t.memo ? `<div class="muted small">${esc(t.memo)}</div>` : ""}</td>
           <td class="hide-sm">${esc(t.account_name)}</td>
-          <td>${t.transfer_id ? `<button type="button" class="pill unlink" title="Money moved between your own accounts; not counted as spending or income. Click if this isn't a transfer.">Transfer</button>` : `<select class="cat" aria-label="Category">${categoryOptions(t.category_id)}</select>`}</td>
+          <td>${t.transfer_id ? `<button type="button" class="pill unlink" title="Money moved between your own accounts; not counted as spending or income. Click if this isn't a transfer.">Transfer</button>` : `<select class="cat" aria-label="Category">${categoryOptions(t.category_id)}</select>${t.auto_category ? ' <span class="pill auto-tag" title="Guessed automatically. Pick another category if it\'s wrong; FinOrganizer will remember.">auto</span>' : ""}`}</td>
           ${moneyCell(t.amount_cents)}
           <td class="actions"><button class="link edit">Edit</button><button class="link danger del">Delete</button></td></tr>`).join("")
           : `<tr><td colspan="6" class="empty">No transactions match.</td></tr>`}</tbody></table></div>
@@ -467,6 +471,12 @@ pages.transactions = async (params) => {
   $("#add").onclick = () => editTransaction(null, { account_id: f.account_id }).then(route);
   $("#transfer").onclick = () => newTransfer().then(route);
   $("#import").onclick = () => importCSV(f.account_id).then(route);
+  $("#autocat").onclick = async () => {
+    const r = await attempt(() => api("POST", "/api/transactions/auto-categorize"));
+    toast(r.categorized ? `Categorized ${r.categorized} transaction${r.categorized === 1 ? "" : "s"}`
+      : "Nothing left to categorize automatically. Pick categories for the rest and similar ones will follow.");
+    if (r.categorized) route();
+  };
   const byId = Object.fromEntries(txs.map((t) => [t.id, t]));
   $$("tbody tr[data-id]").forEach((tr) => {
     const t = byId[tr.dataset.id];
@@ -481,7 +491,13 @@ pages.transactions = async (params) => {
         await attempt(() => api("POST", `/api/transactions/${t.id}/unlink-transfer`), "Split into two transactions").then(route);
     };
     const sel = $(".cat", tr);
-    if (sel) sel.onchange = () => attempt(() => api("PUT", `/api/transactions/${t.id}`, { category_id: sel.value || null }), "Category updated");
+    if (sel) sel.onchange = async () => {
+      const r = await attempt(() => api("PUT", `/api/transactions/${t.id}`, { category_id: sel.value || null }));
+      toast(r.similar_updated
+        ? `Category updated, and applied to ${r.similar_updated} other ${r.similar_updated === 1 ? "transaction" : "transactions"} from the same merchant`
+        : "Category updated");
+      if (r.similar_updated) route(); else { const tag = $(".auto-tag", tr); if (tag) tag.remove(); }
+    };
   });
 };
 

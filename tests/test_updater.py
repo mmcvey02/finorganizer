@@ -33,6 +33,10 @@ def fake_release(tag="v1.1.40", files=None):
 class UpdaterTests(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp()
+        self.archive = os.path.join(self.dir, "data", "previous-versions")
+        patcher = mock.patch.object(updater, "archive_dir", lambda: self.archive)
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def tearDown(self):
         shutil.rmtree(self.dir)
@@ -83,9 +87,30 @@ class UpdaterTests(unittest.TestCase):
             self.assertEqual(f.read(), b"new cli")
         with open(exe + ".old", "rb") as f:
             self.assertEqual(f.read(), b"old")  # the running program was moved aside, not overwritten
+        with open(exe + ".new.part", "wb") as f:
+            f.write(b"half a download")
         with mock.patch.object(updater.sys, "platform", "win32"):  # Windows leftovers
             updater.cleanup_old(exe)
+        # The replaced build moves into the data folder, named after its version.
         self.assertFalse(os.path.exists(exe + ".old"))
+        self.assertFalse(os.path.exists(exe + ".new.part"))
+        archived = os.path.join(self.archive, "FinOrganizer-%s.exe" % updater.current_version())
+        with open(archived, "rb") as f:
+            self.assertEqual(f.read(), b"old")
+        self.assertEqual(sorted(os.listdir(self.dir)), ["FinOrganizer-cli.exe", "FinOrganizer.exe", "data"])
+
+    def test_only_the_latest_previous_version_is_kept(self):
+        exe = os.path.join(self.dir, "FinOrganizer.exe")
+        os.makedirs(self.archive)
+        with open(os.path.join(self.archive, "FinOrganizer-1.2.6.exe"), "wb") as f:
+            f.write(b"ancient")
+        with open(os.path.join(self.archive, ".replaced-version"), "w") as f:
+            f.write("1.2.7")
+        with open(exe + ".old", "wb") as f:
+            f.write(b"1.2.7 build")
+        with mock.patch.object(updater.sys, "platform", "win32"):
+            updater.cleanup_old(exe)
+        self.assertEqual(os.listdir(self.archive), ["FinOrganizer-1.2.7.exe"])
 
     def test_corrupted_download_changes_nothing(self):
         exe = os.path.join(self.dir, "FinOrganizer.exe")

@@ -12,7 +12,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from . import banksync, csvio, db, ledger, planning, reports, summary_page, updater
+from . import banksync, categorize, csvio, db, ledger, planning, reports, summary_page, updater
 from .db import ACCOUNT_TYPES, CATEGORY_KINDS, FREQUENCIES
 from .profiles import DEFAULT_ID
 from .money import month_bounds, month_of, today
@@ -109,8 +109,13 @@ def build_router(app=None):
         if "category_id" in b:
             b["category_id"] = _opt_int(b["category_id"])
         L.update_transaction(c, i, **b)
+        # Your choice also sorts other uncategorized transactions from the same merchant.
+        similar = categorize.apply_to_similar(c, i) if b.get("category_id") else 0
+        return {"similar_updated": similar}
 
     r.add("GET", "/api/transactions", list_tx)
+    r.add("POST", "/api/transactions/auto-categorize",
+          lambda c, q, b: {"categorized": categorize.categorize_uncategorized(c)})
     r.add("POST", "/api/transactions", add_tx)
     r.add("PUT", r"/api/transactions/(\d+)", update_tx)
     r.add("DELETE", r"/api/transactions/(\d+)", lambda c, q, b, i: L.delete_transaction(c, i))
@@ -260,6 +265,7 @@ class App:
         self.profile_id = profile_id
         self.lock = threading.RLock()
         self.router = build_router(self)
+        categorize.backfill_once(self.conn)  # sort existing transactions on first run
 
     @property
     def profile_name(self):
@@ -271,6 +277,7 @@ class App:
         new_conn = self.profiles.open(profile_id)
         old, self.conn, self.profile_id = self.conn, new_conn, profile_id
         old.close()
+        categorize.backfill_once(new_conn)
         self.profiles.remember(profile_id)
 
     def handle(self, method, path, query, body):

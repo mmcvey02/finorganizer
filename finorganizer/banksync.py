@@ -19,7 +19,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from .csvio import _payee_category_map
+from .categorize import Categorizer
 from .db import row, rows
 from .ledger import NotFound, add_account, detect_transfers, get_account
 from .money import to_cents
@@ -342,7 +342,7 @@ def _windows(start, end):
         cur = nxt
 
 
-def _import_transactions(conn, account_id, txns, learned):
+def _import_transactions(conn, account_id, txns, categorizer):
     imported = matched = 0
     for t in txns:
         if t.get("pending"):
@@ -369,10 +369,12 @@ def _import_transactions(conn, account_id, txns, learned):
                          (ext, manual[0]))
             matched += 1
             continue
+        category_id = categorizer.guess(payee, memo, amount)
         conn.execute(
             "INSERT INTO transactions (account_id, date, amount_cents, payee, category_id, memo,"
-            " cleared, external_id) VALUES (?, ?, ?, ?, ?, ?, 1, ?)",
-            (account_id, date.isoformat(), amount, payee, learned.get(payee.lower()), memo, ext))
+            " cleared, external_id, auto_category) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)",
+            (account_id, date.isoformat(), amount, payee, category_id, memo, ext,
+             int(category_id is not None)))
         imported += 1
     return imported, matched
 
@@ -427,7 +429,7 @@ def sync_connection(conn, connection_id, today=None, _rerun=False):
 
     result = {"connection_id": connection_id, "label": c["label"], "imported": 0, "matched": 0,
               "added_accounts": added, "errors": []}
-    learned = _payee_category_map(conn)
+    categorizer = Categorizer(conn)
     discovered = []
     try:
         remote_by_id = {}
@@ -449,7 +451,7 @@ def sync_connection(conn, connection_id, today=None, _rerun=False):
                 continue
             if r["id"] not in before:
                 continue  # just discovered: the follow-up pass fetches its full history
-            imp, mat = _import_transactions(conn, r["account_id"], remote_by_id.get(r["remote_id"], []), learned)
+            imp, mat = _import_transactions(conn, r["account_id"], remote_by_id.get(r["remote_id"], []), categorizer)
             result["imported"] += imp
             result["matched"] += mat
             _take_flag(conn, "backfill", r["account_id"])
