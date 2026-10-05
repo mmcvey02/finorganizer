@@ -240,6 +240,7 @@ jobs:
 
       - uses: actions/download-artifact@v4
         with:
+          pattern: FinOrganizer-*  # the app downloads, not the web app's Pages bundle
           path: release-files
           merge-multiple: true
 
