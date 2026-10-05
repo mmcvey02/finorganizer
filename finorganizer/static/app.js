@@ -1373,7 +1373,18 @@ async function autoSync() {
 }
 setInterval(autoSync, 30 * 60e3);
 
+// Show the installed version, and say so once after an update has been installed.
+function announceVersion() {
+  const v = store.meta && store.meta.version;
+  if (!v) return;
+  $("#app-version").textContent = "v" + v;
+  const previous = pref("lastVersion", "");
+  if (previous && previous !== v) toast(`FinOrganizer was updated to ${v}`);
+  setPref("lastVersion", v);
+}
+
 Promise.all([loadShared(), loadProfiles()]).then(route).then(() => {
+  announceVersion();
   autoSync();
   if (pref("autoUpdateCheck", "on") === "on") checkForUpdates();
 }).catch((e) => {
