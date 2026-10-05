@@ -259,7 +259,8 @@ PAGE = """<!doctype html>
   .muted { color: #777; }
   .pos { color: #1d7a3a; }
   h2.split { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
-  h2 .note { text-transform: none; letter-spacing: 0; font-weight: 400; color: #555; white-space: nowrap; }
+  h2.split { white-space: nowrap; }
+  h2 .note { text-transform: none; letter-spacing: 0; font-weight: 400; font-size: 8pt; color: #555; }
   td { white-space: nowrap; } td:first-child { white-space: normal; }
   table.bars.goals td.barcell, table.bars.budgets td.barcell { width: 24%%; }
   .legend { display: flex; gap: 12px; font-size: 7.5pt; color: #555; margin: 1px 0 2px; }

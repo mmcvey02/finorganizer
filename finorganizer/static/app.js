@@ -1177,6 +1177,9 @@ function initTheme() {
   };
 }
 
+// The pywebview desktop shell exposes native helpers here; absent in a normal browser.
+const desktop = () => (window.pywebview && window.pywebview.api) || null;
+
 function initToolbar() {
   const sel = $("#profile-select");
   sel.onchange = async () => {
@@ -1188,8 +1191,19 @@ function initToolbar() {
   };
   $("#print-btn").onclick = () => {
     const month = new URLSearchParams(location.hash.split("?")[1] || "").get("month") || thisMonth();
-    window.open(`/summary?print=1&month=${encodeURIComponent(month)}`, "_blank");
+    // In the desktop app the summary opens in its own native window.
+    if (desktop()) desktop().open_summary(month);
+    else window.open(`/summary?print=1&month=${encodeURIComponent(month)}`, "_blank");
   };
+  // Desktop app: save exports through a native "Save as" dialog instead of a download.
+  document.addEventListener("click", async (e) => {
+    const a = e.target.closest("a[href^='/api/export.csv']");
+    if (!a || !desktop()) return;
+    e.preventDefault();
+    const q = new URLSearchParams(a.getAttribute("href").split("?")[1] || "");
+    const saved = await desktop().export_csv(q.get("start") || "", q.get("end") || "");
+    if (saved) toast(`Saved ${saved}`);
+  });
 }
 
 window.addEventListener("hashchange", route);

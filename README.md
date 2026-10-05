@@ -25,28 +25,36 @@ Optionally install it to get a `finorganizer` command: `pip install .`
 Set `FINORGANIZER_DB=/path/to/file.db` (or pass `--db`) to choose where data is stored.
 Back up your data by copying that file.
 
-## Windows app (FinOrganizer.exe)
+## Windows app
 
-A standalone `FinOrganizer.exe` is built automatically on every push by GitHub Actions
-(`.github/workflows/windows-exe.yml`). No Python install is needed to run it.
+GitHub Actions builds two Windows programs on every push (`.github/workflows/windows-exe.yml`).
+Neither needs Python installed.
+
+| Program | What it is |
+|---|---|
+| **`FinOrganizer.exe`** | The desktop app. Opens in its own window, with no browser and no console. **Closing the window quits FinOrganizer completely.** |
+| `FinOrganizer-cli.exe` | Command-line tool, e.g. `FinOrganizer-cli.exe report summary`. Run with no arguments, it opens the app in your web browser instead (keep its console window open while you use it). |
 
 - **Download:** open the repository's **Actions** tab, pick the latest "Build Windows executable"
-  run, and download the `FinOrganizer-windows` artifact (a zip containing the .exe). Pushing a tag
-  like `v1.0.0` also attaches the .exe to a GitHub Release.
-- **Run:** double-click `FinOrganizer.exe`. A console window opens and your browser opens the app.
-  Keep the window open while you use it; close it to quit.
-- **Your data** lives in `%APPDATA%\FinOrganizer\finorganizer.db`. Copy that file to back it up.
-- **Command line:** the same .exe accepts every CLI command, e.g.
-  `FinOrganizer.exe report summary` or `FinOrganizer.exe --db demo.db demo`.
-- Windows SmartScreen may warn about an unrecognized app because the .exe isn't code-signed.
-  Choose "More info" then "Run anyway".
+  run, and download the `FinOrganizer-windows` artifact (a zip containing both programs). Pushing
+  a tag like `v1.0.0` also attaches them to a GitHub Release.
+- **Requirements:** the desktop window uses Microsoft Edge WebView2, which is built into
+  Windows 10 and 11. If it's missing, FinOrganizer says so; install the WebView2 Runtime from
+  Microsoft or use `FinOrganizer-cli.exe`.
+- **Your data** lives in `%APPDATA%\FinOrganizer\finorganizer.db` and is shared by both programs.
+  Copy that file to back it up.
+- Windows SmartScreen may warn about an unrecognized app because the programs aren't
+  code-signed. Choose "More info" then "Run anyway".
 
-To build it yourself on a Windows machine:
+To build them yourself on a Windows machine:
 
 ```bash
-pip install pyinstaller
-python packaging/build_exe.py      # output: dist\FinOrganizer.exe
+pip install pyinstaller pywebview
+python packaging/build_exe.py      # output: dist\FinOrganizer.exe and dist\FinOrganizer-cli.exe
 ```
+
+Running from source, the desktop window is `pip install pywebview` then
+`python -m finorganizer.desktop` (or `pip install .[desktop]` and run `finorganizer-desktop`).
 
 ## Profiles, printing and bank connections
 
@@ -169,6 +177,7 @@ finorganizer/
   profiles.py  separate profiles (one database file each)
   banksync.py  SimpleFIN bank connections and syncing
   summary_page.py  one-page printable summary with charts
+  desktop.py   desktop app: native window via pywebview; closing it quits
   server.py    local JSON API + static file server (standard library only)
   cli.py       command-line interface
   sample.py    demo data generator

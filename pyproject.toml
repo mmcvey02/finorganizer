@@ -10,8 +10,14 @@ readme = "README.md"
 requires-python = ">=3.9"
 dependencies = []
 
+[project.optional-dependencies]
+desktop = ["pywebview>=5"]
+
 [project.scripts]
 finorganizer = "finorganizer.cli:main"
+
+[project.gui-scripts]
+finorganizer-desktop = "finorganizer.desktop:main"
 
 [tool.setuptools]
 packages = ["finorganizer"]

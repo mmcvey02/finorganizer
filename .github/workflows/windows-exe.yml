@@ -23,33 +23,51 @@ jobs:
       - name: Run tests
         run: python -m unittest discover -s tests -v
 
-      - name: Build FinOrganizer.exe
+      - name: Build FinOrganizer.exe and FinOrganizer-cli.exe
         run: |
-          python -m pip install --upgrade pip pyinstaller
+          python -m pip install --upgrade pip pyinstaller pywebview
           python packaging/build_exe.py
 
-      - name: Smoke-test the executable
+      - name: Smoke-test the command-line executable
         shell: pwsh
         run: |
           $db = Join-Path $env:RUNNER_TEMP "smoke.db"
-          dist\FinOrganizer.exe --db $db demo
+          dist\FinOrganizer-cli.exe --db $db demo
           if ($LASTEXITCODE -ne 0) { exit 1 }
-          dist\FinOrganizer.exe --db $db report summary
+          dist\FinOrganizer-cli.exe --db $db report summary
           if ($LASTEXITCODE -ne 0) { exit 1 }
-          $p = Start-Process dist\FinOrganizer.exe -ArgumentList "--db", $db, "serve", "--port", "8799" -PassThru
+          $p = Start-Process dist\FinOrganizer-cli.exe -ArgumentList "--db", $db, "serve", "--port", "8799" -PassThru
           Start-Sleep -Seconds 5
           $page = Invoke-WebRequest http://127.0.0.1:8799/ -UseBasicParsing
           $api = Invoke-WebRequest http://127.0.0.1:8799/api/accounts -UseBasicParsing
           Stop-Process -Id $p.Id
           if (-not $page.Content.Contains("FinOrganizer") -or $api.StatusCode -ne 200) { exit 1 }
 
+      - name: Smoke-test the desktop app (opens its window, renders, closes, exits)
+        shell: pwsh
+        run: |
+          $db = Join-Path $env:RUNNER_TEMP "smoke.db"
+          $p = Start-Process dist\FinOrganizer.exe -ArgumentList "--db", $db, "--smoke-test" -PassThru
+          if (-not $p.WaitForExit(120000)) { Stop-Process -Id $p.Id -Force; Write-Error "desktop app did not exit"; exit 1 }
+          Write-Host "desktop app exit code: $($p.ExitCode)"
+          $log = Join-Path $env:RUNNER_TEMP "finorganizer-desktop.log"
+          if (Test-Path $log) { Get-Content $log }
+          if ($p.ExitCode -ne 0) { exit 1 }
+          Start-Sleep -Seconds 2
+          if (Get-Process -Name FinOrganizer -ErrorAction SilentlyContinue) { Write-Error "process still running after window closed"; exit 1 }
+          try { Invoke-WebRequest http://127.0.0.1:8765/ -UseBasicParsing -TimeoutSec 3; Write-Error "server still running"; exit 1 } catch { Write-Host "server stopped" }
+
       - uses: actions/upload-artifact@v4
         with:
           name: FinOrganizer-windows
-          path: dist/FinOrganizer.exe
+          path: |
+            dist/FinOrganizer.exe
+            dist/FinOrganizer-cli.exe
 
       - name: Attach to GitHub release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/FinOrganizer.exe
+          files: |
+            dist/FinOrganizer.exe
+            dist/FinOrganizer-cli.exe

@@ -373,18 +373,28 @@ def make_handler(app):
     return Handler
 
 
-def serve(conn, host="127.0.0.1", port=8765, open_browser=False, fallback_port=False,
-          profiles=None, profile_id=DEFAULT_ID):
-    """Run the web app. With ``fallback_port``, pick a free port if ``port`` is taken."""
-    handler = make_handler(App(conn, profiles, profile_id))
+def make_server(conn, host="127.0.0.1", port=8765, fallback_port=False,
+                profiles=None, profile_id=DEFAULT_ID):
+    """Create (but don't start) the HTTP server. Returns (httpd, app, url).
+
+    With ``fallback_port``, pick a free port if ``port`` is taken.
+    """
+    app = App(conn, profiles, profile_id)
+    handler = make_handler(app)
     try:
         httpd = ThreadingHTTPServer((host, port), handler)
     except OSError:
         if not fallback_port:
             raise
         httpd = ThreadingHTTPServer((host, 0), handler)
-    port = httpd.server_address[1]
-    url = "http://%s:%d" % (host, port)
+    httpd.daemon_threads = True
+    return httpd, app, "http://%s:%d" % (host, httpd.server_address[1])
+
+
+def serve(conn, host="127.0.0.1", port=8765, open_browser=False, fallback_port=False,
+          profiles=None, profile_id=DEFAULT_ID):
+    """Run the web app in the foreground until Ctrl+C."""
+    httpd, _app, url = make_server(conn, host, port, fallback_port, profiles, profile_id)
     print("FinOrganizer running at %s  (Ctrl+C to stop)" % url, flush=True)
     if open_browser:
         import webbrowser

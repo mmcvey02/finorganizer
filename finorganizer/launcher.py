@@ -1,8 +1,8 @@
-"""Entry point for the packaged desktop executable (FinOrganizer.exe).
+"""Entry point for the packaged command-line executable (FinOrganizer-cli.exe).
 
-Double-clicking it (no arguments) starts the web app and opens the browser.
+Double-clicking it (no arguments) starts the web app and opens it in the browser.
 Run with arguments from a terminal, it behaves like the normal CLI, e.g.
-``FinOrganizer.exe report summary``.
+``FinOrganizer-cli.exe report summary``. The desktop app (FinOrganizer.exe) is desktop.py.
 """
 
 import sys
