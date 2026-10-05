@@ -204,10 +204,16 @@ dialog::backdrop { background: rgba(0,0,0,.4); }
 .kv dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; font-weight: 600; }
 .stack { display: flex; flex-direction: column; gap: 10px; }
 
+.top-actions { display: flex; gap: 6px; align-items: center; }
+#profile-select { max-width: 180px; font-weight: 600; }
+.pill.good { background: var(--good-bg); color: var(--good); }
+.pill.info { background: var(--info-bg); color: var(--accent); }
+
 @media (max-width: 640px) {
   .topbar { flex-wrap: wrap; padding: 8px 16px; gap: 8px; }
   nav { order: 3; flex-basis: 100%; }
-  #theme-toggle { margin-left: auto; }
+  .top-actions { margin-left: auto; }
+  #profile-select { max-width: 130px; }
   .cols-2, .cols-3 { grid-template-columns: 1fr; }
   .tile .value { font-size: 20px; }
   .hide-sm { display: none; }

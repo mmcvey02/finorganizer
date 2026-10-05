@@ -12,8 +12,9 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from . import csvio, ledger, planning, reports
+from . import banksync, csvio, db, ledger, planning, reports, summary_page
 from .db import ACCOUNT_TYPES, CATEGORY_KINDS, FREQUENCIES
+from .profiles import DEFAULT_ID
 from .money import month_bounds, month_of, today
 
 STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
@@ -64,7 +65,7 @@ class Router:
         raise HTTPError(405 if allowed else 404, "not found")
 
 
-def build_router():
+def build_router(app=None):
     r = Router()
     L = ledger
 
@@ -199,6 +200,50 @@ def build_router():
 
     r.add("POST", "/api/planning/emergency", emergency)
 
+    # profiles (separate database per person)
+    def need_profiles():
+        if app is None or app.profiles is None:
+            raise HTTPError(400, "profiles are not available")
+        return app.profiles
+
+    def list_profiles(c, q, b):
+        if app is None or app.profiles is None:
+            return {"current": DEFAULT_ID, "profiles": [{"id": DEFAULT_ID, "name": "Default"}]}
+        return {"current": app.profile_id, "profiles": app.profiles.list()}
+
+    def create_profile(c, q, b):
+        pid = need_profiles().create(b.get("name"))
+        if b.get("switch", True):
+            app.switch(pid)
+        return {"id": pid}
+
+    def delete_profile(c, q, b, pid):
+        pid = str(pid)
+        if pid == app.profile_id:
+            app.switch(DEFAULT_ID)  # close it first; Windows can't delete an open file
+        need_profiles().delete(pid)
+
+    r.add("GET", "/api/profiles", list_profiles)
+    r.add("POST", "/api/profiles", create_profile)
+    def switch_profile(c, q, b):
+        need_profiles()
+        app.switch(str(b.get("id") or ""))
+
+    r.add("POST", "/api/profiles/switch", switch_profile)
+    r.add("PUT", r"/api/profiles/([a-z0-9-]+)", lambda c, q, b, pid: need_profiles().rename(str(pid), b.get("name")))
+    r.add("DELETE", r"/api/profiles/([a-z0-9-]+)", delete_profile)
+
+    # linked bank connections (SimpleFIN)
+    r.add("GET", "/api/connections", lambda c, q, b: banksync.list_connections(c))
+    r.add("POST", "/api/connections", lambda c, q, b: {"id": banksync.connect(
+        c, b.get("setup_token") or "", b.get("label") or "")})
+    r.add("DELETE", r"/api/connections/(\d+)", lambda c, q, b, i: banksync.delete_connection(c, i))
+    r.add("POST", "/api/connections/sync", lambda c, q, b: banksync.sync(c))
+    r.add("PUT", r"/api/remote-accounts/(\d+)", lambda c, q, b, i: banksync.link_remote(
+        c, i, b.get("action"), _opt_int(b.get("account_id")), b.get("type") or None))
+    r.add("POST", r"/api/remote-accounts/(\d+)/match-balance",
+          lambda c, q, b, i: banksync.match_bank_balance(c, i))
+
     # import / export
     r.add("POST", "/api/import", lambda c, q, b: csvio.import_csv(
         c, _int(b.get("account_id")), b.get("csv") or "", bool(b.get("invert")),
@@ -207,10 +252,24 @@ def build_router():
 
 
 class App:
-    def __init__(self, conn):
+    def __init__(self, conn, profiles=None, profile_id=DEFAULT_ID):
         self.conn = conn
-        self.lock = threading.Lock()
-        self.router = build_router()
+        self.profiles = profiles
+        self.profile_id = profile_id
+        self.lock = threading.RLock()
+        self.router = build_router(self)
+
+    @property
+    def profile_name(self):
+        return db.get_setting(self.conn, "profile_name") or (
+            "" if self.profile_id == DEFAULT_ID else self.profile_id)
+
+    def switch(self, profile_id):
+        """Point the app at another profile's database (caller holds the lock)."""
+        new_conn = self.profiles.open(profile_id)
+        old, self.conn, self.profile_id = self.conn, new_conn, profile_id
+        old.close()
+        self.profiles.remember(profile_id)
 
     def handle(self, method, path, query, body):
         fn, args = self.router.match(method, path)
@@ -219,6 +278,11 @@ class App:
                 return fn(self.conn, query, body, *args)
             except ledger.NotFound as e:
                 raise HTTPError(404, str(e))
+            except LookupError as e:
+                raise HTTPError(404, str(e).strip("'\""))
+            except banksync.SyncError as e:
+                self.conn.rollback()
+                raise HTTPError(502, str(e))
             except sqlite3.IntegrityError as e:
                 self.conn.rollback()
                 msg = str(e)
@@ -259,6 +323,11 @@ def make_handler(app):
                                                 end=query.get("end") or None)
                     return self._send(200, text.encode(), "text/csv; charset=utf-8",
                                       {"Content-Disposition": 'attachment; filename="transactions.csv"'})
+                if url.path == "/summary" and method == "GET":
+                    with app.lock:
+                        page = summary_page.render(app.conn, query.get("month") or None,
+                                                   app.profile_name, query.get("print") == "1")
+                    return self._send(200, page.encode(), "text/html; charset=utf-8")
                 if not url.path.startswith("/api/"):
                     if method != "GET":
                         raise HTTPError(405, "method not allowed")
@@ -304,9 +373,10 @@ def make_handler(app):
     return Handler
 
 
-def serve(conn, host="127.0.0.1", port=8765, open_browser=False, fallback_port=False):
+def serve(conn, host="127.0.0.1", port=8765, open_browser=False, fallback_port=False,
+          profiles=None, profile_id=DEFAULT_ID):
     """Run the web app. With ``fallback_port``, pick a free port if ``port`` is taken."""
-    handler = make_handler(App(conn))
+    handler = make_handler(App(conn, profiles, profile_id))
     try:
         httpd = ThreadingHTTPServer((host, port), handler)
     except OSError:

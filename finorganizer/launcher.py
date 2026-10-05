@@ -15,13 +15,16 @@ def main():
         cli_main()
         return
     try:
-        from . import db
+        from .profiles import Profiles
         from .server import serve
-        conn = db.connect()
+        profiles = Profiles()
+        pid = profiles.last_used()
+        conn = profiles.open(pid)
         print("FinOrganizer")
-        print("Your data is stored in: %s" % db.DEFAULT_DB_PATH)
+        print("Your data is stored in: %s" % profiles.base_path)
+        print("Additional profiles are stored in: %s" % profiles.dir)
         print("Keep this window open while you use the app; close it to quit.\n")
-        serve(conn, open_browser=True, fallback_port=True)
+        serve(conn, open_browser=True, fallback_port=True, profiles=profiles, profile_id=pid)
     except Exception:
         # Window would vanish on a double-click; leave the error visible.
         traceback.print_exc()

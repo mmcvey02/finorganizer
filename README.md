@@ -48,6 +48,38 @@ pip install pyinstaller
 python packaging/build_exe.py      # output: dist\FinOrganizer.exe
 ```
 
+## Profiles, printing and bank connections
+
+**Profiles** keep separate finances for different people (a partner, a parent, a child), each
+in its own data file with its own accounts, budgets, goals and bank connections. Switch or create
+profiles from the menu at the top right of the app; "Manage profiles…" renames or deletes them.
+Your original data is the "Default" profile. Extra profiles are stored next to it, in
+`%APPDATA%\FinOrganizer\finorganizer-profiles\` on Windows or `~/.finorganizer-profiles/` elsewhere.
+The app reopens the last profile you used.
+
+**Printable summary.** The **Print** button opens a one-page summary of the current profile
+(net worth, an income-vs-spending chart, a net-worth trend chart, accounts, spending by category,
+budget vs actual, goals, upcoming bills, debts and notes) and opens the print dialog. Choose
+"Save as PDF" to keep a copy. It's laid out to fit one Letter or A4 page.
+
+**Linked banks (automatic updates)** use [SimpleFIN Bridge](https://beta-bridge.simplefin.org),
+a low-cost, subscription-based, read-only service that connects to thousands of US banks:
+
+1. Sign up at SimpleFIN Bridge and connect your banks there.
+2. Create a *setup token* ("New connection").
+3. In FinOrganizer go to **Accounts → Connect bank** and paste the token.
+4. For each bank account choose **Create a new account**, an existing account to feed, or
+   **Don't import**.
+5. Click **Sync now**. The app also syncs automatically when opened if the last sync is over 12 hours old.
+
+Syncing downloads posted transactions (pending ones are picked up once they post), never
+creates duplicates, matches transactions you already typed in by hand, auto-categorizes payees
+you've categorized before, and shows any difference between the bank's balance and the app's,
+with a one-click **Match bank** fix. Access is read-only: FinOrganizer can never move money.
+The connection's access key is stored in your profile's data file, so protect that file like
+your other financial records; removing the connection in the app (or revoking it on the
+SimpleFIN site) cuts off access.
+
 ## Features
 
 **Tracking**
@@ -105,6 +137,12 @@ finorganizer report year --year 2026
 finorganizer plan debt 600           # avalanche vs snowball for your debt accounts
 finorganizer plan loan 25000 6.5 60 --extra 100 --schedule
 finorganizer plan retirement --age 35 --savings 40000 --monthly 800 --income 60000
+finorganizer profile create "Jamie"          # new profile (and switch to it)
+finorganizer profile use Default             # switch back; or add --profile NAME to any command
+finorganizer summary --open                  # one-page printable summary
+finorganizer bank connect <SETUP_TOKEN>      # link banks via SimpleFIN
+finorganizer bank link 1 --new               # or --account "Everyday Checking" / --ignore
+finorganizer bank sync
 finorganizer import checking statement.csv
 finorganizer export --file transactions.csv
 ```
@@ -128,6 +166,9 @@ finorganizer/
   reports.py   summaries, cash flow, net worth, insights, dashboard
   planning.py  loan, debt payoff, retirement, savings and emergency-fund calculators
   csvio.py     CSV import/export
+  profiles.py  separate profiles (one database file each)
+  banksync.py  SimpleFIN bank connections and syncing
+  summary_page.py  one-page printable summary with charts
   server.py    local JSON API + static file server (standard library only)
   cli.py       command-line interface
   sample.py    demo data generator

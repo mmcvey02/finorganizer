@@ -105,7 +105,43 @@ CREATE TABLE IF NOT EXISTS recurring (
     next_date TEXT NOT NULL,
     active INTEGER NOT NULL DEFAULT 1
 );
+
+CREATE TABLE IF NOT EXISTS settings (
+    key TEXT PRIMARY KEY,
+    value TEXT
+);
+
+-- Linked bank connections (SimpleFIN). access_url embeds read-only credentials.
+CREATE TABLE IF NOT EXISTS connections (
+    id INTEGER PRIMARY KEY,
+    provider TEXT NOT NULL DEFAULT 'simplefin',
+    label TEXT NOT NULL DEFAULT '',
+    access_url TEXT NOT NULL,
+    last_sync TEXT,
+    last_error TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Accounts reported by a connection, and which local account (if any) they feed.
+CREATE TABLE IF NOT EXISTS remote_accounts (
+    id INTEGER PRIMARY KEY,
+    connection_id INTEGER NOT NULL REFERENCES connections(id) ON DELETE CASCADE,
+    remote_id TEXT NOT NULL,
+    name TEXT NOT NULL DEFAULT '',
+    institution TEXT NOT NULL DEFAULT '',
+    currency TEXT NOT NULL DEFAULT 'USD',
+    balance_cents INTEGER,
+    balance_date TEXT,
+    account_id INTEGER REFERENCES accounts(id) ON DELETE SET NULL,
+    ignored INTEGER NOT NULL DEFAULT 0,
+    UNIQUE (connection_id, remote_id)
+);
 """
+
+# Columns added after the first release; applied to existing databases on open.
+MIGRATIONS = [
+    ("transactions", "external_id", "ALTER TABLE transactions ADD COLUMN external_id TEXT"),
+]
 
 DEFAULT_CATEGORIES = [
     ("Salary", "income", "Income"),
@@ -150,6 +186,11 @@ def connect(path=None):
 
 def init_schema(conn):
     conn.executescript(SCHEMA)
+    for table, column, sql in MIGRATIONS:
+        if column not in {r[1] for r in conn.execute("PRAGMA table_info(%s)" % table)}:
+            conn.execute(sql)
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_tx_external"
+                 " ON transactions(account_id, external_id) WHERE external_id IS NOT NULL")
     if conn.execute("SELECT COUNT(*) FROM categories").fetchone()[0] == 0:
         conn.executemany(
             "INSERT INTO categories (name, kind, group_name) VALUES (?, ?, ?)",
@@ -165,3 +206,14 @@ def rows(cursor):
 def row(cursor):
     r = cursor.fetchone()
     return dict(r) if r else None
+
+
+def get_setting(conn, key, default=None):
+    r = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
+    return r[0] if r else default
+
+
+def set_setting(conn, key, value):
+    conn.execute("INSERT INTO settings (key, value) VALUES (?, ?)"
+                 " ON CONFLICT (key) DO UPDATE SET value = excluded.value", (key, value))
+    conn.commit()

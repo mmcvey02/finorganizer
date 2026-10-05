@@ -517,7 +517,9 @@ pages.accounts = async (params) => {
         <td class="num hide-sm">${a.interest_rate ? a.interest_rate + "%" : ""}</td>
         <td class="num hide-sm">${a.transaction_count}</td>${moneyCell(a.balance_cents)}
         <td class="actions"><button class="link edit">Edit</button><button class="link arch">${a.archived ? "Restore" : "Archive"}</button><button class="link danger del">Delete</button></td></tr>`).join("")).join("")}
-      </tbody></table></div>` : `<div class="empty">No accounts yet. Add checking, savings, credit cards, loans and investments to track your whole picture.</div>`}</div>`;
+      </tbody></table></div>` : `<div class="empty">No accounts yet. Add checking, savings, credit cards, loans and investments to track your whole picture.</div>`}</div>
+    <div id="banks" style="margin-top:16px"></div>`;
+  renderBanks($("#banks"));
   $("#arch").onchange = (e) => (location.hash = e.target.checked ? "accounts?archived=1" : "accounts");
   $("#add").onclick = () => editAccount(null).then(loadShared).then(route);
   const byId = Object.fromEntries(accts.map((a) => [a.id, a]));
@@ -529,6 +531,154 @@ pages.accounts = async (params) => {
     $(".del", tr).onclick = async () => {
       if (await confirmDialog(`Delete ${a.name} and all ${a.transaction_count} of its transactions? This cannot be undone.`))
         await attempt(() => api("DELETE", `/api/accounts/${a.id}`), "Deleted").then(loadShared).then(route);
+    };
+  });
+};
+
+// --------------------------------------------------------------- linked banks
+
+async function connectBank() {
+  const v = await formDialog("Connect a bank (SimpleFIN)", [
+    { name: "token", label: "SimpleFIN setup token", type: "textarea", required: true, wide: true,
+      hint: "1) Sign up at beta-bridge.simplefin.org and connect your banks there. 2) Click 'New connection' to create a setup token. 3) Paste it here. Each token works once. FinOrganizer only gets read-only access and can never move money." },
+    { name: "label", label: "Name for this connection (optional)", wide: true },
+  ], "Connect");
+  if (!v) return false;
+  await attempt(() => api("POST", "/api/connections", { setup_token: v.token, label: v.label }),
+    "Connected. Choose what each bank account should feed.");
+  return true;
+}
+
+async function syncBanks() {
+  toast("Syncing with your banks…");
+  const results = await attempt(() => api("POST", "/api/connections/sync"));
+  const imported = results.reduce((s, r) => s + r.imported, 0);
+  const matched = results.reduce((s, r) => s + r.matched, 0);
+  const waiting = results.reduce((s, r) => s + r.new_accounts, 0);
+  const errors = results.flatMap((r) => r.errors);
+  toast(`Imported ${imported} new transaction${imported === 1 ? "" : "s"}` +
+    (matched ? `, matched ${matched} you'd already entered` : "") +
+    (waiting ? `; ${waiting} bank account(s) waiting to be linked on the Accounts page` : "") +
+    (errors.length ? `. Problem: ${errors[0]}` : ""), errors.length > 0);
+  await loadShared();
+}
+
+async function renderBanks(box) {
+  const conns = await GET("/api/connections");
+  const linkedTo = new Set(conns.flatMap((c) => c.accounts.map((r) => r.account_id)).filter(Boolean));
+  const feedOptions = (r) => {
+    const opts = [];
+    if (r.status === "new") opts.push(`<option value="" selected>Choose…</option>`);
+    opts.push(`<option value="new">Create a new account</option>`);
+    opts.push(`<option value="ignore" ${r.status === "ignored" ? "selected" : ""}>Don't import</option>`);
+    opts.push(`<optgroup label="Feed an existing account">${store.accounts
+      .filter((a) => a.id === r.account_id || !linkedTo.has(a.id))
+      .map((a) => `<option value="${a.id}" ${a.id === r.account_id ? "selected" : ""}>${esc(a.name)}</option>`).join("")}</optgroup>`);
+    return opts.join("");
+  };
+  box.innerHTML = `<div class="card">
+    <div class="filters"><h2 style="margin:0 auto 0 0">Linked banks</h2>
+      ${conns.length ? '<button class="ghost" id="sync-banks">Sync now</button>' : ""}
+      <button id="connect-bank">+ Connect bank</button></div>
+    ${conns.length ? conns.map((c) => `<div class="conn" data-conn="${c.id}" style="margin-top:10px">
+      <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:baseline">
+        <strong>${esc(c.label)}</strong>
+        <span class="muted small">via ${esc(c.host)} · last synced ${c.last_sync ? esc(c.last_sync.replace("T", " ")) : "never"}</span>
+        ${c.last_error ? `<span class="pill warn">${esc(c.last_error)}</span>` : ""}
+        <button class="link danger rm-conn" style="margin-left:auto">Disconnect</button></div>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Bank account</th><th class="num">Bank balance</th><th>Feeds into</th><th class="num hide-sm">Difference</th></tr></thead>
+        <tbody>${c.accounts.map((r) => `<tr data-remote="${r.id}">
+          <td>${esc(r.name)}<div class="muted small">${esc(r.institution)}${r.balance_date ? " · as of " + esc(r.balance_date) : ""}</div></td>
+          ${moneyCell(r.balance_cents)}
+          <td><select class="feed" aria-label="What ${esc(r.name)} feeds">${feedOptions(r)}</select>
+            ${r.status === "new" ? ' <span class="pill info">new</span>' : ""}</td>
+          <td class="num hide-sm">${r.difference_cents ? `<span class="neg">${money(r.difference_cents)}</span> <button class="link match">Match bank</button>`
+            : (r.status === "linked" ? '<span class="pill good">in sync</span>' : "")}</td></tr>`).join("")}</tbody></table></div></div>`).join("")
+    : `<p class="muted">Link your bank, credit card and loan accounts to download balances and transactions automatically instead of typing them in.
+       This uses <strong>SimpleFIN Bridge</strong>, an inexpensive read-only service that connects to thousands of US banks. Click <em>Connect bank</em> for steps.</p>`}
+  </div>`;
+  $("#connect-bank", box).onclick = async () => { if (await connectBank()) route(); };
+  const syncBtn = $("#sync-banks", box);
+  if (syncBtn) syncBtn.onclick = async () => { syncBtn.disabled = true; try { await syncBanks(); } finally { route(); } };
+  $$(".conn", box).forEach((el) => {
+    const c = conns.find((x) => x.id == el.dataset.conn);
+    $(".rm-conn", el).onclick = async () => {
+      if (await confirmDialog(`Disconnect ${c.label}? Accounts and transactions already imported are kept.`))
+        await attempt(() => api("DELETE", `/api/connections/${c.id}`), "Disconnected").then(route);
+    };
+  });
+  $$("tr[data-remote]", box).forEach((tr) => {
+    const id = tr.dataset.remote;
+    $(".feed", tr).onchange = async (e) => {
+      const v = e.target.value;
+      if (!v) return;
+      const body = v === "new" || v === "ignore" ? { action: v } : { action: "link", account_id: Number(v) };
+      await attempt(() => api("PUT", `/api/remote-accounts/${id}`, body),
+        v === "ignore" ? "Won't import this account" : "Linked. Sync to download its history.");
+      await loadShared();
+      route();
+    };
+    const m = $(".match", tr);
+    if (m) m.onclick = () => attempt(() => api("POST", `/api/remote-accounts/${id}/match-balance`),
+      "Balance adjusted to match the bank").then(loadShared).then(route);
+  });
+}
+
+// -------------------------------------------------------------------- profiles
+
+let profileState = { current: "default", profiles: [] };
+
+async function loadProfiles() {
+  profileState = await GET("/api/profiles");
+  const sel = $("#profile-select");
+  sel.innerHTML = profileState.profiles.map((p) =>
+    `<option value="${esc(p.id)}" ${p.id === profileState.current ? "selected" : ""}>${esc(p.name)}</option>`).join("") +
+    `<option disabled>──────────</option><option value="__new">+ New profile…</option><option value="__manage">Manage profiles…</option>`;
+}
+
+async function switchProfile(id) {
+  await attempt(() => api("POST", "/api/profiles/switch", { id }));
+  await Promise.all([loadShared(), loadProfiles()]);
+  const name = profileState.profiles.find((p) => p.id === id)?.name || id;
+  toast(`Switched to ${name}`);
+  if (location.hash === "#dashboard" || !location.hash) await route(); else location.hash = "dashboard";
+  autoSync();
+}
+
+async function newProfile() {
+  const v = await formDialog("New profile", [{ name: "name", label: "Whose finances? (e.g. a name)", required: true, wide: true,
+    hint: "Each profile has its own accounts, budgets, goals and bank connections." }], "Create");
+  if (!v) return;
+  const r = await attempt(() => api("POST", "/api/profiles", { name: v.name }), "Profile created");
+  await switchProfile(r.id);
+}
+
+pages.profiles = async () => {
+  await loadProfiles();
+  view.innerHTML = `<div class="page-head"><h1>Profiles</h1><button id="add">+ New profile</button></div>
+    <div class="card"><p class="muted">Profiles keep separate finances for different people, each in its own data file. Switch profiles from the menu at the top.</p>
+    <table><tbody>${profileState.profiles.map((p) => `<tr data-pid="${esc(p.id)}">
+      <td><strong>${esc(p.name)}</strong> ${p.id === profileState.current ? '<span class="pill good">current</span>' : ""}</td>
+      <td class="actions">${p.id === profileState.current ? "" : '<button class="link use">Switch to</button>'}
+        <button class="link ren">Rename</button>${p.id === "default" ? "" : '<button class="link danger del">Delete</button>'}</td></tr>`).join("")}
+    </tbody></table></div>`;
+  $("#add").onclick = newProfile;
+  $$("tr[data-pid]").forEach((tr) => {
+    const p = profileState.profiles.find((x) => x.id === tr.dataset.pid);
+    const use = $(".use", tr);
+    if (use) use.onclick = () => switchProfile(p.id);
+    $(".ren", tr).onclick = async () => {
+      const v = await formDialog(`Rename ${p.name}`, [{ name: "name", label: "Name", value: p.name, required: true, wide: true }]);
+      if (v) await attempt(() => api("PUT", `/api/profiles/${p.id}`, { name: v.name }), "Renamed").then(route);
+    };
+    const del = $(".del", tr);
+    if (del) del.onclick = async () => {
+      if (await confirmDialog(`Permanently delete ${p.name} and all of its data? This cannot be undone.`)) {
+        await attempt(() => api("DELETE", `/api/profiles/${p.id}`), "Profile deleted");
+        await loadShared();
+        route();
+      }
     };
   });
 };
@@ -1027,8 +1177,34 @@ function initTheme() {
   };
 }
 
+function initToolbar() {
+  const sel = $("#profile-select");
+  sel.onchange = async () => {
+    const v = sel.value;
+    sel.value = profileState.current;  // keep showing the active profile until a switch succeeds
+    if (v === "__new") newProfile();
+    else if (v === "__manage") location.hash = "profiles";
+    else if (v && v !== profileState.current) switchProfile(v);
+  };
+  $("#print-btn").onclick = () => {
+    const month = new URLSearchParams(location.hash.split("?")[1] || "").get("month") || thisMonth();
+    window.open(`/summary?print=1&month=${encodeURIComponent(month)}`, "_blank");
+  };
+}
+
 window.addEventListener("hashchange", route);
 initTheme();
-loadShared().then(route).catch((e) => {
+initToolbar();
+// Pull fresh bank data when the app opens if the last sync is more than 12 hours old.
+async function autoSync() {
+  const conns = await GET("/api/connections").catch(() => []);
+  const stale = conns.some((c) => !c.last_sync || Date.now() - new Date(c.last_sync).getTime() > 12 * 3600e3);
+  if (conns.length && stale) {
+    await syncBanks().catch(() => {});
+    route();
+  }
+}
+
+Promise.all([loadShared(), loadProfiles()]).then(route).then(autoSync).catch((e) => {
   view.innerHTML = `<div class="card empty">Could not reach the FinOrganizer server: ${esc(e.message)}</div>`;
 });

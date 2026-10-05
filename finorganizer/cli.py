@@ -54,7 +54,98 @@ def cmd_demo(conn, a):
 
 def cmd_serve(conn, a):
     from .server import serve
-    serve(conn, a.host, a.port, open_browser=a.open)
+    serve(conn, a.host, a.port, open_browser=a.open, profiles=a.profiles, profile_id=a.profile_id)
+
+
+def cmd_profile(conn, a):
+    P = a.profiles
+    if a.action == "create":
+        pid = P.create(a.name)
+        P.remember(pid)
+        print("Created profile %r and switched to it." % a.name)
+    elif a.action == "use":
+        pid = P.find(a.name)
+        P.remember(pid)
+        print("Now using profile %r." % P._name(pid))
+    elif a.action == "rename":
+        P.rename(P.find(a.name), a.new_name)
+        print("Renamed.")
+    elif a.action == "delete":
+        pid = P.find(a.name)
+        if not a.yes:
+            sys.exit("This permanently deletes profile %r and all of its data. Re-run with --yes."
+                     % P._name(pid))
+        if pid == a.profile_id:
+            conn.close()
+        P.delete(pid)
+        if P.last_used() == pid or pid == a.profile_id:
+            P.remember("default")
+        print("Deleted.")
+    else:
+        for p in P.list():
+            print("%s %-20s %s" % ("*" if p["id"] == a.profile_id else " ", p["name"], P.path(p["id"])))
+
+
+def cmd_summary(conn, a):
+    from .summary_page import render
+    name = db.get_setting(conn, "profile_name") or ""
+    html = render(conn, a.month, name)
+    path = a.file or "financial-summary.html"
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(html)
+    print("Wrote %s. Open it in a browser and print, or choose 'Save as PDF'." % path)
+    if a.open:
+        import os
+        import webbrowser
+        webbrowser.open("file://" + os.path.abspath(path))
+
+
+def cmd_bank(conn, a):
+    from . import banksync as B
+    if a.action == "connect":
+        cid = B.connect(conn, a.token, a.label or "")
+        print("Connected (#%d). Choose what each bank account should feed:" % cid)
+        _bank_list(conn)
+        print("\nThen run: finorganizer bank link <ID> --new | --account NAME | --ignore")
+    elif a.action == "link":
+        if a.ignore:
+            B.link_remote(conn, a.id, "ignore")
+        elif a.account:
+            B.link_remote(conn, a.id, "link", L.find_account(conn, a.account)["id"])
+        else:
+            B.link_remote(conn, a.id, "new", type=a.type)
+        print("Saved. Run 'finorganizer bank sync' to download transactions.")
+    elif a.action == "sync":
+        for r in B.sync(conn):
+            print("%s: imported %d, matched %d existing%s" % (
+                r["label"], r["imported"], r["matched"],
+                ", %d new account(s) waiting to be linked" % r["new_accounts"] if r["new_accounts"] else ""))
+            for e in r["errors"]:
+                print("  ! " + e)
+    elif a.action == "match":
+        B.match_bank_balance(conn, a.id)
+        print("Account balance now matches the bank.")
+    elif a.action == "remove":
+        B.delete_connection(conn, a.id)
+        print("Connection removed. Imported transactions were kept.")
+    else:
+        _bank_list(conn)
+
+
+def _bank_list(conn):
+    from . import banksync as B
+    conns = B.list_connections(conn)
+    if not conns:
+        print("No bank connections. Create a setup token at https://beta-bridge.simplefin.org"
+              " and run: finorganizer bank connect <TOKEN>")
+        return
+    for c in conns:
+        print("\n#%d %s  (%s)  last sync: %s%s" % (c["id"], c["label"], c["host"], c["last_sync"] or "never",
+                                                  "  ERROR: " + c["last_error"] if c["last_error"] else ""))
+        table(c["accounts"], [
+            ("ID", "id", ">"), ("Bank account", "name", "<"), ("Institution", "institution", "<"),
+            ("Bank balance", money("balance_cents"), ">"), ("Status", "status", "<"),
+            ("Feeds", "account_name", "<"), ("Difference", money("difference_cents"), ">")])
 
 
 def cmd_account(conn, a):
@@ -315,6 +406,7 @@ def build_parser():
     p = argparse.ArgumentParser(prog="finorganizer",
                                 description="Track finances, budget, and plan ahead.")
     p.add_argument("--db", help="database file (default: $FINORGANIZER_DB or ~/.finorganizer.db)")
+    p.add_argument("--profile", help="profile to use (default: the last one used)")
     sub = p.add_subparsers(dest="command", required=True)
 
     s = sub.add_parser("serve", help="run the web app")
@@ -322,6 +414,47 @@ def build_parser():
     s.add_argument("--port", type=int, default=8765)
     s.add_argument("--open", action="store_true", help="open the app in your browser")
     s.set_defaults(fn=cmd_serve)
+
+    s = sub.add_parser("profile", help="separate finances for different people")
+    ss = s.add_subparsers(dest="action", required=True)
+    ss.add_parser("list")
+    x = ss.add_parser("create")
+    x.add_argument("name")
+    x = ss.add_parser("use", help="switch to a profile")
+    x.add_argument("name")
+    x = ss.add_parser("rename")
+    x.add_argument("name")
+    x.add_argument("new_name")
+    x = ss.add_parser("delete")
+    x.add_argument("name")
+    x.add_argument("--yes", action="store_true")
+    s.set_defaults(fn=cmd_profile)
+
+    s = sub.add_parser("summary", help="one-page printable summary (HTML)")
+    s.add_argument("--month")
+    s.add_argument("--file", help="output path (default: financial-summary.html)")
+    s.add_argument("--open", action="store_true", help="open it in the browser")
+    s.set_defaults(fn=cmd_summary)
+
+    s = sub.add_parser("bank", help="link bank accounts via SimpleFIN for automatic updates")
+    ss = s.add_subparsers(dest="action", required=True)
+    ss.add_parser("list")
+    x = ss.add_parser("connect", help="connect using a SimpleFIN setup token")
+    x.add_argument("token")
+    x.add_argument("--label")
+    x = ss.add_parser("link", help="choose what a bank account feeds")
+    x.add_argument("id", type=int, help="bank account ID from 'bank list'")
+    g = x.add_mutually_exclusive_group(required=True)
+    g.add_argument("--new", action="store_true", help="create a new account for it")
+    g.add_argument("--account", help="feed an existing account (id or name)")
+    g.add_argument("--ignore", action="store_true", help="don't import it")
+    x.add_argument("--type", choices=db.ACCOUNT_TYPES, help="account type when using --new")
+    ss.add_parser("sync", help="download new transactions and balances")
+    x = ss.add_parser("match", help="set the account balance to the bank's balance")
+    x.add_argument("id", type=int)
+    x = ss.add_parser("remove")
+    x.add_argument("id", type=int)
+    s.set_defaults(fn=cmd_bank)
 
     s = sub.add_parser("demo", help="load sample data into an empty database")
     s.add_argument("--months", type=int, default=6)
@@ -491,10 +624,18 @@ def build_parser():
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
-    conn = db.connect(args.db)
+    from .banksync import SyncError
+    from .profiles import Profiles
+    try:
+        args.profiles = Profiles(args.db)
+        args.profile_id = (args.profiles.find(args.profile) if args.profile
+                           else args.profiles.last_used())
+        conn = args.profiles.open(args.profile_id)
+    except (ValueError, LookupError) as e:
+        sys.exit("error: %s" % e)
     try:
         args.fn(conn, args)
-    except (ValueError, LookupError, sqlite3.Error) as e:
+    except (ValueError, LookupError, sqlite3.Error, SyncError) as e:
         sys.exit("error: %s" % e)
     finally:
         conn.close()
