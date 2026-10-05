@@ -54,7 +54,7 @@ def cmd_demo(conn, a):
 
 def cmd_serve(conn, a):
     from .server import serve
-    serve(conn, a.host, a.port)
+    serve(conn, a.host, a.port, open_browser=a.open)
 
 
 def cmd_account(conn, a):
@@ -320,6 +320,7 @@ def build_parser():
     s = sub.add_parser("serve", help="run the web app")
     s.add_argument("--host", default="127.0.0.1")
     s.add_argument("--port", type=int, default=8765)
+    s.add_argument("--open", action="store_true", help="open the app in your browser")
     s.set_defaults(fn=cmd_serve)
 
     s = sub.add_parser("demo", help="load sample data into an empty database")

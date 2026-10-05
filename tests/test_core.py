@@ -244,5 +244,31 @@ class ServerTests(unittest.TestCase):
             urllib.request.urlopen(self.base + "/../db.py")
 
 
+class ServeFallbackTests(unittest.TestCase):
+    def test_busy_port_falls_back_to_free_one(self):
+        import socket
+        from unittest import mock
+        from finorganizer import server
+        busy = socket.socket()
+        busy.bind(("127.0.0.1", 0))
+        busy.listen()
+        port = busy.getsockname()[1]
+        started = {}
+
+        def fake_forever(self):
+            started["port"] = self.server_address[1]
+            raise KeyboardInterrupt
+
+        try:
+            with mock.patch.object(server.ThreadingHTTPServer, "serve_forever", fake_forever), \
+                    mock.patch("builtins.print"):
+                with self.assertRaises(OSError):
+                    server.serve(fresh(), port=port)
+                server.serve(fresh(), port=port, fallback_port=True)
+        finally:
+            busy.close()
+        self.assertNotEqual(started["port"], port)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -304,9 +304,21 @@ def make_handler(app):
     return Handler
 
 
-def serve(conn, host="127.0.0.1", port=8765):
-    httpd = ThreadingHTTPServer((host, port), make_handler(App(conn)))
-    print("FinOrganizer running at http://%s:%d  (Ctrl+C to stop)" % (host, port))
+def serve(conn, host="127.0.0.1", port=8765, open_browser=False, fallback_port=False):
+    """Run the web app. With ``fallback_port``, pick a free port if ``port`` is taken."""
+    handler = make_handler(App(conn))
+    try:
+        httpd = ThreadingHTTPServer((host, port), handler)
+    except OSError:
+        if not fallback_port:
+            raise
+        httpd = ThreadingHTTPServer((host, 0), handler)
+    port = httpd.server_address[1]
+    url = "http://%s:%d" % (host, port)
+    print("FinOrganizer running at %s  (Ctrl+C to stop)" % url, flush=True)
+    if open_browser:
+        import webbrowser
+        threading.Timer(0.5, webbrowser.open, (url,)).start()
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

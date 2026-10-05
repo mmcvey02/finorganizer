@@ -8,9 +8,18 @@ ISO-8601 strings (YYYY-MM-DD), months are YYYY-MM.
 import os
 import sqlite3
 
-DEFAULT_DB_PATH = os.environ.get(
-    "FINORGANIZER_DB", os.path.join(os.path.expanduser("~"), ".finorganizer.db")
-)
+def _default_db_path():
+    if os.environ.get("FINORGANIZER_DB"):
+        return os.environ["FINORGANIZER_DB"]
+    if os.name == "nt" and os.environ.get("APPDATA"):
+        # Windows: keep data in %APPDATA%\FinOrganizer, next to other per-user app data.
+        folder = os.path.join(os.environ["APPDATA"], "FinOrganizer")
+        os.makedirs(folder, exist_ok=True)
+        return os.path.join(folder, "finorganizer.db")
+    return os.path.join(os.path.expanduser("~"), ".finorganizer.db")
+
+
+DEFAULT_DB_PATH = _default_db_path()
 
 ACCOUNT_TYPES = (
     "checking",

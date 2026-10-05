@@ -1,0 +1,55 @@
+name: Build Windows executable
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write  # needed to attach the .exe to a release on version tags
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run tests
+        run: python -m unittest discover -s tests -v
+
+      - name: Build FinOrganizer.exe
+        run: |
+          python -m pip install --upgrade pip pyinstaller
+          python packaging/build_exe.py
+
+      - name: Smoke-test the executable
+        shell: pwsh
+        run: |
+          $db = Join-Path $env:RUNNER_TEMP "smoke.db"
+          dist\FinOrganizer.exe --db $db demo
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          dist\FinOrganizer.exe --db $db report summary
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          $p = Start-Process dist\FinOrganizer.exe -ArgumentList "--db", $db, "serve", "--port", "8799" -PassThru
+          Start-Sleep -Seconds 5
+          $page = Invoke-WebRequest http://127.0.0.1:8799/ -UseBasicParsing
+          $api = Invoke-WebRequest http://127.0.0.1:8799/api/accounts -UseBasicParsing
+          Stop-Process -Id $p.Id
+          if (-not $page.Content.Contains("FinOrganizer") -or $api.StatusCode -ne 200) { exit 1 }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: FinOrganizer-windows
+          path: dist/FinOrganizer.exe
+
+      - name: Attach to GitHub release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/FinOrganizer.exe

@@ -25,6 +25,29 @@ Optionally install it to get a `finorganizer` command: `pip install .`
 Set `FINORGANIZER_DB=/path/to/file.db` (or pass `--db`) to choose where data is stored.
 Back up your data by copying that file.
 
+## Windows app (FinOrganizer.exe)
+
+A standalone `FinOrganizer.exe` is built automatically on every push by GitHub Actions
+(`.github/workflows/windows-exe.yml`). No Python install is needed to run it.
+
+- **Download:** open the repository's **Actions** tab, pick the latest "Build Windows executable"
+  run, and download the `FinOrganizer-windows` artifact (a zip containing the .exe). Pushing a tag
+  like `v1.0.0` also attaches the .exe to a GitHub Release.
+- **Run:** double-click `FinOrganizer.exe`. A console window opens and your browser opens the app.
+  Keep the window open while you use it; close it to quit.
+- **Your data** lives in `%APPDATA%\FinOrganizer\finorganizer.db`. Copy that file to back it up.
+- **Command line:** the same .exe accepts every CLI command, e.g.
+  `FinOrganizer.exe report summary` or `FinOrganizer.exe --db demo.db demo`.
+- Windows SmartScreen may warn about an unrecognized app because the .exe isn't code-signed.
+  Choose "More info" then "Run anyway".
+
+To build it yourself on a Windows machine:
+
+```bash
+pip install pyinstaller
+python packaging/build_exe.py      # output: dist\FinOrganizer.exe
+```
+
 ## Features
 
 **Tracking**
