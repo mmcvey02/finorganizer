@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "finorganizer"
+version = "1.0.0"
+description = "Personal finance tracker: accounts, budgets, goals, bills, reports and planning calculators."
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = []
+
+[project.scripts]
+finorganizer = "finorganizer.cli:main"
+
+[tool.setuptools]
+packages = ["finorganizer"]
+
+[tool.setuptools.package-data]
+finorganizer = ["static/*"]
