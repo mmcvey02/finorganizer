@@ -417,14 +417,20 @@ async function importCSV(defaultAccount) {
 pages.transactions = async (params) => {
   const f = Object.fromEntries(params);
   const qs = new URLSearchParams({ ...f, limit: 500 });
-  const txs = await GET(`/api/transactions?${qs}`);
+  const [txs, conns] = await Promise.all([GET(`/api/transactions?${qs}`), GET("/api/connections").catch(() => [])]);
   const total = txs.reduce((s, t) => s + t.amount_cents, 0);
+  const lastSync = conns.map((c) => c.last_sync).filter(Boolean).sort().pop();
+  const syncErrors = conns.filter((c) => c.last_error);
   view.innerHTML = `
     <div class="page-head"><h1>Transactions</h1>
+      ${conns.length ? `<span class="muted small">Banks synced ${lastSync ? esc(lastSync.replace("T", " ").slice(0, 16)) : "never"}</span>
+        <button class="ghost sync-banks" id="tx-sync">Sync banks</button>` : ""}
       <button class="ghost" id="import">Import CSV</button>
       <a class="btn ghost" style="background:transparent;color:var(--text-2);border-color:var(--border);text-decoration:none" href="/api/export.csv${f.start ? `?start=${f.start}&end=${f.end || ""}` : ""}">Export CSV</a>
       <button class="ghost" id="transfer">Transfer</button>
       <button id="add">+ Transaction</button></div>
+    ${syncErrors.map((c) => `<div class="insight warning"><span class="icon">!</span><span>${esc(c.label)}: ${esc(c.last_error)}
+      <a href="#accounts">Fix on the Accounts page</a></span></div>`).join("")}
     <div class="card">
       <form class="filters" id="filters">
         <input name="search" placeholder="Search payee or memo" value="${esc(f.search || "")}">
@@ -440,7 +446,7 @@ pages.transactions = async (params) => {
         <thead><tr><th>Date</th><th>Payee</th><th class="hide-sm">Account</th><th>Category</th><th class="num">Amount</th><th></th></tr></thead>
         <tbody>${txs.length ? txs.map((t) => `<tr data-id="${t.id}">
           <td>${esc(t.date)}</td>
-          <td>${esc(t.payee)}${t.memo ? `<div class="muted small">${esc(t.memo)}</div>` : ""}</td>
+          <td>${esc(t.payee)}${t.external_id ? ' <span class="pill info" title="Downloaded from your bank">bank</span>' : ""}${t.memo ? `<div class="muted small">${esc(t.memo)}</div>` : ""}</td>
           <td class="hide-sm">${esc(t.account_name)}</td>
           <td>${t.transfer_id ? `<span class="pill">Transfer</span>` : `<select class="cat" aria-label="Category">${categoryOptions(t.category_id)}</select>`}</td>
           ${moneyCell(t.amount_cents)}
@@ -456,6 +462,8 @@ pages.transactions = async (params) => {
   form.onchange = apply;
   form.onsubmit = (e) => { e.preventDefault(); apply(); };
   $("#clear").onclick = () => (location.hash = "transactions");
+  const txSync = $("#tx-sync");
+  if (txSync) txSync.onclick = () => syncBanks().catch(() => {});
   $("#add").onclick = () => editTransaction(null, { account_id: f.account_id }).then(route);
   $("#transfer").onclick = () => newTransfer().then(route);
   $("#import").onclick = () => importCSV(f.account_id).then(route);
@@ -544,24 +552,45 @@ async function connectBank() {
     { name: "label", label: "Name for this connection (optional)", wide: true },
   ], "Connect");
   if (!v) return false;
+  toast("Connecting and downloading your accounts…");
   const r = await attempt(() => api("POST", "/api/connections", { setup_token: v.token, label: v.label }));
   if (r.warning) toast(r.warning, true);
-  else toast("Connected. Choose what each bank account should feed.");
+  else toast(`Connected. Downloaded ${r.sync ? r.sync.imported : 0} transactions into ` +
+    `${r.sync ? r.sync.added_accounts.join(", ") : "your accounts"}. You can change where each bank account goes below.`);
   return true;
 }
 
-async function syncBanks() {
-  toast("Syncing with your banks…");
-  const results = await attempt(() => api("POST", "/api/connections/sync"));
-  const imported = results.reduce((s, r) => s + r.imported, 0);
-  const matched = results.reduce((s, r) => s + r.matched, 0);
-  const waiting = results.reduce((s, r) => s + r.new_accounts, 0);
-  const errors = results.flatMap((r) => r.errors);
-  toast(`Imported ${imported} new transaction${imported === 1 ? "" : "s"}` +
-    (matched ? `, matched ${matched} you'd already entered` : "") +
-    (waiting ? `; ${waiting} bank account(s) waiting to be linked on the Accounts page` : "") +
-    (errors.length ? `. Problem: ${errors[0]}` : ""), errors.length > 0);
-  await loadShared();
+let syncing = null;
+
+// Download from every linked bank, then redraw whatever page is open so new
+// transactions and balances appear immediately. Concurrent calls share one sync.
+async function syncBanks({ quiet = false } = {}) {
+  if (syncing) return syncing;
+  syncing = (async () => {
+    if (!quiet) toast("Syncing with your banks…");
+    $$(".sync-banks").forEach((b) => { b.disabled = true; b.textContent = "Syncing…"; });
+    try {
+      const results = await api("POST", "/api/connections/sync");
+      const imported = results.reduce((s, r) => s + r.imported, 0);
+      const matched = results.reduce((s, r) => s + r.matched, 0);
+      const added = results.flatMap((r) => r.added_accounts);
+      const errors = results.flatMap((r) => r.errors);
+      if (!quiet || imported || errors.length)
+        toast(`Imported ${imported} new transaction${imported === 1 ? "" : "s"} from your banks` +
+          (matched ? `, matched ${matched} you'd already entered` : "") +
+          (added.length ? `; now syncing ${added.join(", ")}` : "") +
+          (errors.length ? `. Problem: ${errors[0]}` : ""), errors.length > 0);
+      return results;
+    } catch (e) {
+      toast(e.message, true);
+      throw e;
+    } finally {
+      syncing = null;
+      await loadShared();
+      await route();
+    }
+  })();
+  return syncing;
 }
 
 async function renderBanks(box) {
@@ -579,7 +608,7 @@ async function renderBanks(box) {
   };
   box.innerHTML = `<div class="card">
     <div class="filters"><h2 style="margin:0 auto 0 0">Linked banks</h2>
-      ${conns.length ? '<button class="ghost" id="sync-banks">Sync now</button>' : ""}
+      ${conns.length ? '<button class="ghost sync-banks" id="sync-banks">Sync now</button>' : ""}
       <button id="connect-bank">+ Connect bank</button></div>
     ${conns.length ? conns.map((c) => `<div class="conn" data-conn="${c.id}" style="margin-top:10px">
       <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:baseline">
@@ -599,9 +628,9 @@ async function renderBanks(box) {
     : `<p class="muted">Link your bank, credit card and loan accounts to download balances and transactions automatically instead of typing them in.
        This uses <strong>SimpleFIN Bridge</strong>, an inexpensive read-only service that connects to thousands of US banks. Click <em>Connect bank</em> for steps.</p>`}
   </div>`;
-  $("#connect-bank", box).onclick = async () => { if (await connectBank()) route(); };
+  $("#connect-bank", box).onclick = async () => { if (await connectBank()) { await loadShared(); route(); } };
   const syncBtn = $("#sync-banks", box);
-  if (syncBtn) syncBtn.onclick = async () => { syncBtn.disabled = true; try { await syncBanks(); } finally { route(); } };
+  if (syncBtn) syncBtn.onclick = () => syncBanks().catch(() => {});
   $$(".conn", box).forEach((el) => {
     const c = conns.find((x) => x.id == el.dataset.conn);
     $(".rm-conn", el).onclick = async () => {
@@ -655,17 +684,98 @@ async function newProfile() {
   await switchProfile(r.id);
 }
 
-pages.profiles = async () => {
+// --------------------------------------------------------------------- updates
+
+let updateInfo = null;
+const pref = (key, fallback) => { try { return localStorage.getItem(key) ?? fallback; } catch (_) { return fallback; } };
+const setPref = (key, value) => { try { localStorage.setItem(key, value); } catch (_) { /* ignore */ } };
+
+async function checkForUpdates() {
+  updateInfo = await GET("/api/update").catch((e) => ({ error: e.message, available: false }));
+  renderUpdateBanner();
+  return updateInfo;
+}
+
+function renderUpdateBanner() {
+  const b = $("#update-banner");
+  const u = updateInfo;
+  if (!u || !u.available || pref("dismissedUpdate", "") === u.latest) { b.hidden = true; return; }
+  b.hidden = false;
+  b.innerHTML = `<span>FinOrganizer <strong>${esc(u.latest)}</strong> is available (you have ${esc(u.current)}).</span>
+    <button id="upd-now">${u.can_install && desktop() ? "Update now" : "Download"}</button>
+    <a href="#settings">What's new</a>
+    <button class="ghost" id="upd-later">Not now</button>`;
+  $("#upd-now", b).onclick = installUpdate;
+  $("#upd-later", b).onclick = () => { setPref("dismissedUpdate", u.latest); renderUpdateBanner(); };
+}
+
+async function installUpdate() {
+  const u = updateInfo;
+  if (!u) return;
+  if (!(u.can_install && desktop())) {  // browser / source installs: open the download page
+    window.open(u.page, "_blank");
+    return;
+  }
+  $$("#upd-now, #settings-update").forEach((x) => { x.disabled = true; x.textContent = "Downloading…"; });
+  toast("Downloading the update. FinOrganizer will restart by itself.");
+  const r = await desktop().install_update();
+  toast(r.message, !r.ok);
+  if (!r.ok) {
+    $$("#upd-now, #settings-update").forEach((x) => { x.disabled = false; x.textContent = "Try again"; });
+    if (r.page) window.open(r.page, "_blank");
+  }
+}
+
+pages.settings = async () => {
   await loadProfiles();
-  view.innerHTML = `<div class="page-head"><h1>Profiles</h1><button id="add">+ New profile</button></div>
-    <div class="card"><p class="muted">Profiles keep separate finances for different people, each in its own data file. Switch profiles from the menu at the top.</p>
+  const auto = pref("autoUpdateCheck", "on") === "on";
+  view.innerHTML = `<div class="page-head"><h1>Settings</h1></div>
+    <div class="card" id="updates-card"><h2>Updates</h2>
+      <dl class="kv" style="max-width:420px"><dt>Installed version</dt><dd>${esc(store.meta.version)}</dd>
+        <dt>Latest version</dt><dd id="latest-version">${updateInfo && updateInfo.latest ? esc(updateInfo.latest) : "–"}</dd></dl>
+      <div id="update-status" class="muted" style="margin:10px 0"></div>
+      <div class="filters">
+        <button class="ghost" id="check-now">Check for updates</button>
+        <button id="settings-update" hidden>Update now</button>
+        <label class="check"><input type="checkbox" id="auto-check" ${auto ? "checked" : ""}> Check automatically when FinOrganizer opens</label>
+      </div>
+      <div id="update-notes"></div>
+      <p class="muted small">Updates replace only the program. Your data, profiles and bank connections are kept.</p>
+    </div>
+    <div style="height:16px"></div>
+    <div id="profiles-section"></div>`;
+  const show = (u) => {
+    $("#latest-version").textContent = u.latest || "–";
+    const btn = $("#settings-update");
+    btn.hidden = !u.available;
+    btn.textContent = u.can_install && desktop() ? `Update to ${u.latest}` : "Download the new version";
+    btn.onclick = installUpdate;
+    $("#update-status").innerHTML = u.error ? `<span class="neg">Couldn't check: ${esc(u.error)}</span>`
+      : u.available ? `<strong>Version ${esc(u.latest)} is available.</strong>` : "You have the latest version.";
+    $("#update-notes").innerHTML = u.available && u.notes ? `<h2 style="margin-top:12px">What's new</h2><div class="notes">${esc(u.notes)}</div>` : "";
+  };
+  if (updateInfo) show(updateInfo);
+  $("#check-now").onclick = async (e) => {
+    e.target.disabled = true; e.target.textContent = "Checking…";
+    try { setPref("dismissedUpdate", ""); show(await checkForUpdates()); }
+    finally { e.target.disabled = false; e.target.textContent = "Check for updates"; }
+  };
+  $("#auto-check").onchange = (e) => setPref("autoUpdateCheck", e.target.checked ? "on" : "off");
+  await renderProfiles($("#profiles-section"));
+};
+
+pages.profiles = pages.settings;
+
+async function renderProfiles(box) {
+  box.innerHTML = `<div class="card"><div class="filters"><h2 style="margin:0 auto 0 0">Profiles</h2><button id="add">+ New profile</button></div>
+    <p class="muted">Profiles keep separate finances for different people, each in its own data file. Switch profiles from the menu at the top.</p>
     <table><tbody>${profileState.profiles.map((p) => `<tr data-pid="${esc(p.id)}">
       <td><strong>${esc(p.name)}</strong> ${p.id === profileState.current ? '<span class="pill good">current</span>' : ""}</td>
       <td class="actions">${p.id === profileState.current ? "" : '<button class="link use">Switch to</button>'}
         <button class="link ren">Rename</button>${p.id === "default" ? "" : '<button class="link danger del">Delete</button>'}</td></tr>`).join("")}
     </tbody></table></div>`;
-  $("#add").onclick = newProfile;
-  $$("tr[data-pid]").forEach((tr) => {
+  $("#add", box).onclick = newProfile;
+  $$("tr[data-pid]", box).forEach((tr) => {
     const p = profileState.profiles.find((x) => x.id === tr.dataset.pid);
     const use = $(".use", tr);
     if (use) use.onclick = () => switchProfile(p.id);
@@ -1187,7 +1297,7 @@ function initToolbar() {
     const v = sel.value;
     sel.value = profileState.current;  // keep showing the active profile until a switch succeeds
     if (v === "__new") newProfile();
-    else if (v === "__manage") location.hash = "profiles";
+    else if (v === "__manage") location.hash = "settings";
     else if (v && v !== profileState.current) switchProfile(v);
   };
   $("#print-btn").onclick = () => {
@@ -1210,16 +1320,19 @@ function initToolbar() {
 window.addEventListener("hashchange", route);
 initTheme();
 initToolbar();
-// Pull fresh bank data when the app opens if the last sync is more than 12 hours old.
+// Keep bank data fresh: sync on open and every so often while the app stays open.
+const AUTO_SYNC_HOURS = 6;
 async function autoSync() {
   const conns = await GET("/api/connections").catch(() => []);
-  const stale = conns.some((c) => !c.last_sync || Date.now() - new Date(c.last_sync).getTime() > 12 * 3600e3);
-  if (conns.length && stale) {
-    await syncBanks().catch(() => {});
-    route();
-  }
+  const stale = conns.some((c) => !c.last_sync ||
+    Date.now() - new Date(c.last_sync).getTime() > AUTO_SYNC_HOURS * 3600e3);
+  if (conns.length && stale) await syncBanks({ quiet: true }).catch(() => {});
 }
+setInterval(autoSync, 30 * 60e3);
 
-Promise.all([loadShared(), loadProfiles()]).then(route).then(autoSync).catch((e) => {
+Promise.all([loadShared(), loadProfiles()]).then(route).then(() => {
+  autoSync();
+  if (pref("autoUpdateCheck", "on") === "on") checkForUpdates();
+}).catch((e) => {
   view.innerHTML = `<div class="card empty">Could not reach the FinOrganizer server: ${esc(e.message)}</div>`;
 });

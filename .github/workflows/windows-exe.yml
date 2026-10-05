@@ -3,12 +3,11 @@ name: Build Windows executable
 on:
   push:
     branches: ["**"]
-    tags: ["v*"]
   pull_request:
   workflow_dispatch:
 
 permissions:
-  contents: write  # needed to attach the .exe to a release on version tags
+  contents: write  # needed to publish releases
 
 jobs:
   build:
@@ -22,6 +21,20 @@ jobs:
 
       - name: Run tests
         run: python -m unittest discover -s tests -v
+
+      - name: Stamp version
+        id: version
+        shell: pwsh
+        run: |
+          $base = python -c "import finorganizer as f; print('.'.join(f.__version__.split('.')[:2]))"
+          $version = "$base.$env:GITHUB_RUN_NUMBER"
+          "VERSION = `"$version`"" | Out-File -Encoding utf8 finorganizer/_build.py
+          "version=$version" >> $env:GITHUB_OUTPUT
+          Write-Host "Building FinOrganizer $version"
+          # Release notes: the commit message without its trailer lines.
+          $msg = git log -1 --format=%B
+          ($msg | Where-Object { $_ -notmatch '^(Co-Authored-By|Claude-Session):' }) -join "`n" |
+            Out-File -Encoding utf8 release-notes.md
 
       - name: Build FinOrganizer.exe and FinOrganizer-cli.exe
         run: |
@@ -64,10 +77,17 @@ jobs:
             dist/FinOrganizer.exe
             dist/FinOrganizer-cli.exe
 
-      - name: Attach to GitHub release
-        if: startsWith(github.ref, 'refs/tags/v')
+      # Every build of the default branch becomes a release; the app's update
+      # checker looks at the latest one.
+      - name: Publish release
+        if: github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: v${{ steps.version.outputs.version }}
+          target_commitish: ${{ github.sha }}
+          name: FinOrganizer ${{ steps.version.outputs.version }}
+          body_path: release-notes.md
+          make_latest: true
           files: |
             dist/FinOrganizer.exe
             dist/FinOrganizer-cli.exe

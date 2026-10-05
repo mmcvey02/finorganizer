@@ -16,7 +16,7 @@ import threading
 import time
 import traceback
 
-from . import csvio
+from . import csvio, updater
 from .profiles import Profiles
 from .server import make_server
 
@@ -46,12 +46,31 @@ class Api:
         self._app = server_app
         self._url = base_url
         self._main = None
+        self._relaunch = None
 
     def open_summary(self, month=""):
         """Open the printable summary in its own window."""
         import webview
         url = "%s/summary?print=1%s" % (self._url, "&month=" + month if month else "")
         webview.create_window("Financial Summary", url, width=900, height=820)
+
+    def install_update(self):
+        """Download the latest version, then close so it can start in our place."""
+        info = updater.check()
+        if info["error"]:
+            return {"ok": False, "message": info["error"]}
+        if not info["available"]:
+            return {"ok": False, "message": "You already have the latest version (%s)." % info["current"]}
+        if not info["can_install"]:
+            return {"ok": False, "message": "Automatic install only works in the Windows app.",
+                    "page": info["page"]}
+        try:
+            self._relaunch = updater.install(info)
+        except (updater.UpdateError, OSError) as e:
+            return {"ok": False, "message": "Update failed: %s" % e, "page": info["page"]}
+        # Close shortly after replying; run() starts the new version once we've shut down.
+        threading.Timer(1.0, self._main.destroy).start()
+        return {"ok": True, "message": "Updated to %s. Restarting…" % info["latest"]}
 
     def export_csv(self, start="", end=""):
         """Ask where to save, then write the transactions CSV there."""
@@ -72,6 +91,16 @@ class Api:
 def run(db_path=None, smoke_test=False):
     """Start the desktop app; returns the process exit code."""
     import webview
+
+    if updater.can_self_update():
+        # Remove the previous version left by an update (it may still be exiting for a moment).
+        def _cleanup():
+            for _ in range(10):
+                updater.cleanup_old()
+                if not os.path.exists(sys.executable + ".old"):
+                    return
+                time.sleep(3)
+        threading.Thread(target=_cleanup, daemon=True).start()
 
     profiles = Profiles(db_path)
     profile_id = profiles.last_used()
@@ -126,6 +155,8 @@ def run(db_path=None, smoke_test=False):
         httpd.server_close()
         with server_app.lock:
             server_app.conn.close()
+    if api._relaunch:
+        updater.relaunch(api._relaunch)  # start the updated version now that we've let go
     return 0 if outcome["ok"] else 1
 
 

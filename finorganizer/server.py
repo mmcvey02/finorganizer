@@ -12,7 +12,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from . import banksync, csvio, db, ledger, planning, reports, summary_page
+from . import banksync, csvio, db, ledger, planning, reports, summary_page, updater
 from .db import ACCOUNT_TYPES, CATEGORY_KINDS, FREQUENCIES
 from .profiles import DEFAULT_ID
 from .money import month_bounds, month_of, today
@@ -72,7 +72,8 @@ def build_router(app=None):
     # meta
     r.add("GET", "/api/meta", lambda c, q, b: {
         "account_types": ACCOUNT_TYPES, "category_kinds": CATEGORY_KINDS,
-        "frequencies": FREQUENCIES, "today": today().isoformat()})
+        "frequencies": FREQUENCIES, "today": today().isoformat(),
+        "version": updater.current_version(), "can_self_update": updater.can_self_update()})
     r.add("GET", "/api/dashboard", lambda c, q, b: reports.dashboard(c, q.get("month")))
 
     # accounts
@@ -323,6 +324,9 @@ def make_handler(app):
                                                 end=query.get("end") or None)
                     return self._send(200, text.encode(), "text/csv; charset=utf-8",
                                       {"Content-Disposition": 'attachment; filename="transactions.csv"'})
+                if url.path == "/api/update" and method == "GET":
+                    # Network call to GitHub: done outside the database lock.
+                    return self._send(200, updater.check())
                 if url.path == "/summary" and method == "GET":
                     with app.lock:
                         page = summary_page.render(app.conn, query.get("month") or None,

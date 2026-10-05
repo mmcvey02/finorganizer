@@ -35,9 +35,13 @@ Neither needs Python installed.
 | **`FinOrganizer.exe`** | The desktop app. Opens in its own window, with no browser and no console. **Closing the window quits FinOrganizer completely.** |
 | `FinOrganizer-cli.exe` | Command-line tool, e.g. `FinOrganizer-cli.exe report summary`. Run with no arguments, it opens the app in your web browser instead (keep its console window open while you use it). |
 
-- **Download:** open the repository's **Actions** tab, pick the latest "Build Windows executable"
-  run, and download the `FinOrganizer-windows` artifact (a zip containing both programs). Pushing
-  a tag like `v1.0.0` also attaches them to a GitHub Release.
+- **Download:** get `FinOrganizer.exe` (and optionally `FinOrganizer-cli.exe`) from the
+  [latest release](https://github.com/mmcvey02/finorganizer/releases/latest). Every build of the
+  main branch is published there automatically as version 1.1.*build number*.
+- **Updates:** the app checks for a newer release when it opens (switch this off under
+  ⚙ Settings) and shows a banner. **Update now** downloads the new version, verifies it against
+  GitHub's checksum, swaps it in and restarts. Your data, profiles and bank connections are
+  untouched. You can also check any time from ⚙ Settings.
 - **Requirements:** the desktop window uses Microsoft Edge WebView2, which is built into
   Windows 10 and 11. If it's missing, FinOrganizer says so; install the WebView2 Runtime from
   Microsoft or use `FinOrganizer-cli.exe`.
@@ -76,9 +80,12 @@ a low-cost, subscription-based, read-only service that connects to thousands of 
 1. Sign up at SimpleFIN Bridge and connect your banks there.
 2. Create a *setup token* ("New connection").
 3. In FinOrganizer go to **Accounts → Connect bank** and paste the token.
-4. For each bank account choose **Create a new account**, an existing account to feed, or
-   **Don't import**.
-5. Click **Sync now**. The app also syncs automatically when opened if the last sync is over 12 hours old.
+4. That's it: connecting downloads right away, and each bank account is linked to an existing
+   account with the same name or gets a new one, so its transactions appear on the
+   **Transactions** page (tagged "bank"). You can change where any bank account goes, or choose
+   **Don't import**, on the Accounts page.
+5. New data arrives whenever you click **Sync banks** (Transactions page) or **Sync now**
+   (Accounts page). The app also syncs by itself when opened and every few hours while open.
 
 Syncing downloads posted transactions (pending ones are picked up once they post), never
 creates duplicates, matches transactions you already typed in by hand, auto-categorizes payees
@@ -178,6 +185,7 @@ finorganizer/
   banksync.py  SimpleFIN bank connections and syncing
   summary_page.py  one-page printable summary with charts
   desktop.py   desktop app: native window via pywebview; closing it quits
+  updater.py   checks GitHub Releases and installs updates in the Windows app
   server.py    local JSON API + static file server (standard library only)
   cli.py       command-line interface
   sample.py    demo data generator

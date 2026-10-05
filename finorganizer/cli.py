@@ -107,9 +107,10 @@ def cmd_bank(conn, a):
         print("Connected (#%d)." % result["id"])
         if result["warning"]:
             print("Note: " + result["warning"])
-        print("Choose what each bank account should feed:")
+        if result.get("sync"):
+            print("Downloaded %d transaction(s)." % result["sync"]["imported"])
         _bank_list(conn)
-        print("\nThen run: finorganizer bank link <ID> --new | --account NAME | --ignore")
+        print("\nTo change where a bank account goes: finorganizer bank link <ID> --new | --account NAME | --ignore")
     elif a.action == "link":
         if a.ignore:
             B.link_remote(conn, a.id, "ignore")
@@ -122,7 +123,7 @@ def cmd_bank(conn, a):
         for r in B.sync(conn):
             print("%s: imported %d, matched %d existing%s" % (
                 r["label"], r["imported"], r["matched"],
-                ", %d new account(s) waiting to be linked" % r["new_accounts"] if r["new_accounts"] else ""))
+                "; now syncing into: " + ", ".join(r["added_accounts"]) if r["added_accounts"] else ""))
             for e in r["errors"]:
                 print("  ! " + e)
     elif a.action == "match":

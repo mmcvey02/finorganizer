@@ -134,32 +134,29 @@ class BankSyncTests(unittest.TestCase):
         return next(r for r in conn["accounts"] if r["name"] == name)
 
     def test_full_flow(self):
-        cid = banksync.connect(self.c, self.fake.token("flow"))["id"]
+        # An account typed in by hand earlier, named like the bank's, with one matching entry.
+        mine = L.add_account(self.c, "Checking", "checking", 10000)
+        L.add_transaction(self.c, mine, "2026-09-04", -4510, "Groceries run")
+
+        r = banksync.connect(self.c, self.fake.token("flow"))
+        self.assertIsNone(r["warning"])
         conns = banksync.list_connections(self.c)
         self.assertEqual(conns[0]["label"], "CardCo, First Bank")
         self.assertEqual(conns[0]["host"], "http://127.0.0.1")  # credentials never exposed
         self.assertNotIn("s3cret", json.dumps(conns))
-        self.assertEqual({r["status"] for r in conns[0]["accounts"]}, {"new"})
 
-        # Nothing is imported until the user decides what each bank account feeds.
-        r = banksync.sync_connection(self.c, cid, today=TODAY)
-        self.assertEqual((r["imported"], r["new_accounts"]), (0, 2))
+        # Connecting downloads immediately: every bank account feeds an account right away.
+        self.assertEqual({x["status"] for x in conns[0]["accounts"]}, {"linked"})
+        self.assertEqual(self.remote("Checking")["account_id"], mine)  # matched by name
+        self.assertEqual(sorted(r["sync"]["added_accounts"]), ["Checking", "Rewards Visa (CardCo)"])
+        self.assertEqual((r["sync"]["imported"], r["sync"]["matched"]), (3, 1))  # pending skipped
 
-        # Checking feeds an existing account where one transaction was already typed in.
-        mine = L.add_account(self.c, "My Checking", "checking", 0)
-        L.add_transaction(self.c, mine, "2026-09-04", -4510, "Groceries run")
-        banksync.link_remote(self.c, self.remote("Checking")["id"], "link", mine)
-        banksync.link_remote(self.c, self.remote("Rewards Visa")["id"], "new")
-
-        r = banksync.sync_connection(self.c, cid, today=TODAY)
-        self.assertEqual(r["errors"], [])
-        self.assertEqual((r["imported"], r["matched"]), (3, 1))  # pending item skipped
         txs = {t["payee"]: t for t in L.list_transactions(self.c, account_id=mine)}
         self.assertEqual(set(txs), {"PAYROLL ACME", "Groceries run", "RENT"})
         manual = self.c.execute("SELECT external_id, cleared FROM transactions WHERE id = ?",
                                 (txs["Groceries run"]["id"],)).fetchone()
         self.assertEqual(tuple(manual), ("t2", 1))  # bank charge matched the hand-typed entry
-        self.assertEqual(len(L.list_transactions(self.c, account_id=mine)), 3)
+        self.assertTrue(txs["RENT"]["external_id"])  # marked as coming from the bank
 
         # The account created from the bank adds up to the bank balance.
         visa = self.remote("Rewards Visa")
@@ -167,18 +164,42 @@ class BankSyncTests(unittest.TestCase):
         self.assertEqual((acct["type"], acct["balance_cents"]), ("credit_card", -25000))
         self.assertEqual(visa["difference_cents"], 0)
 
-        # The linked manual account differs from the bank until the user matches it.
-        chk = self.remote("Checking")
-        self.assertEqual(chk["difference_cents"], 150000 - (200000 - 4510 - 45490))
-        banksync.match_bank_balance(self.c, chk["id"])
+        # The hand-made account's opening balance was off by $100 until matched to the bank.
+        self.assertEqual(self.remote("Checking")["difference_cents"], -10000)
+        banksync.match_bank_balance(self.c, self.remote("Checking")["id"])
         self.assertEqual(self.remote("Checking")["difference_cents"], 0)
 
         # Syncing again never duplicates.
-        r = banksync.sync_connection(self.c, cid, today=TODAY + dt.timedelta(days=1))
-        self.assertEqual((r["imported"], r["matched"]), (0, 0))
+        again = banksync.sync_connection(self.c, r["id"], today=TODAY + dt.timedelta(days=1))
+        self.assertEqual((again["imported"], again["matched"], again["added_accounts"]), (0, 0, []))
+
+    def test_dont_import_is_respected(self):
+        cid = banksync.add_connection(self.c, "http://user:s3cret@127.0.0.1:%d/simplefin" % self.fake.port)["id"]
+        banksync.link_remote(self.c, self.remote("Rewards Visa")["id"], "ignore")
+        r = banksync.sync_connection(self.c, cid, today=TODAY)
+        self.assertEqual(r["added_accounts"], ["Checking (First Bank)"])
+        self.assertEqual(self.remote("Rewards Visa")["status"], "ignored")
+        self.assertEqual([a["name"] for a in L.list_accounts(self.c)], ["Checking (First Bank)"])
+
+    def test_account_discovered_later_gets_full_history(self):
+        cid = banksync.add_connection(self.c, "http://user:s3cret@127.0.0.1:%d/simplefin" % self.fake.port)["id"]
+        banksync.sync_connection(self.c, cid, today=TODAY)
+        self.fake.accounts.append({
+            "org": {"name": "Credit Union"}, "id": "SAV-2", "name": "Savings", "currency": "USD",
+            "balance": "900.00", "balance-date": ts("2026-10-20"),
+            "transactions": [{"id": "s1", "posted": ts("2026-08-01"), "amount": "900.00",
+                              "description": "OPENING DEPOSIT"}]})
+        try:
+            r = banksync.sync_connection(self.c, cid, today=TODAY + dt.timedelta(days=20))
+        finally:
+            self.fake.accounts.pop()
+        self.assertEqual(r["added_accounts"], ["Savings (Credit Union)"])
+        self.assertEqual(r["imported"], 1)  # 80-day-old deposit fetched despite the recent last sync
+        sav = self.remote("Savings")
+        self.assertEqual(L.get_account(self.c, sav["account_id"])["balance_cents"], 90000)
 
     def test_requests_are_windowed(self):
-        cid = banksync.connect(self.c, self.fake.token("windows"))["id"]
+        cid = banksync.add_connection(self.c, "http://user:s3cret@127.0.0.1:%d/simplefin" % self.fake.port)["id"]
         self.fake.requests.clear()
         banksync.sync_connection(self.c, cid, today=TODAY)
         spans = [(int(q["end-date"]) - int(q["start-date"])) / 86400 for q in self.fake.requests]
@@ -186,7 +207,7 @@ class BankSyncTests(unittest.TestCase):
         self.assertGreaterEqual(sum(spans), banksync.FIRST_SYNC_DAYS)
 
     def test_ignore_and_relink_validation(self):
-        banksync.connect(self.c, self.fake.token("ignore"))
+        banksync.add_connection(self.c, "http://user:s3cret@127.0.0.1:%d/simplefin" % self.fake.port)
         banksync.link_remote(self.c, self.remote("Checking")["id"], "ignore")
         self.assertEqual(self.remote("Checking")["status"], "ignored")
         a = L.add_account(self.c, "A", "checking")
@@ -244,7 +265,7 @@ class BankSyncTests(unittest.TestCase):
         # Later, syncing works with the saved access; no new token needed.
         result = banksync.sync_connection(self.c, r["id"], today=TODAY)
         self.assertEqual(result["errors"], [])
-        self.assertEqual(result["new_accounts"], 2)
+        self.assertEqual(len(result["added_accounts"]), 2)
         self.assertIsNone(banksync.list_connections(self.c)[0]["last_error"])
 
     def test_revoked_access_is_reported(self):

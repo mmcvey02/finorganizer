@@ -214,7 +214,14 @@ def connect(conn, setup_token, label=""):
     Returns ``{"id": connection_id, "warning": message_or_None}``.
     """
     access_url = claim_setup_token(setup_token)
-    return add_connection(conn, access_url, label)
+    result = add_connection(conn, access_url, label)
+    if result["warning"] is None or "SimpleFIN reported" in result["warning"]:
+        # Download right away so balances and transactions appear without another click.
+        result["sync"] = sync_connection(conn, result["id"])
+        if result["sync"]["errors"] and result["warning"] is None:
+            result["warning"] = "Connected, but the first download had a problem: " + \
+                "; ".join(result["sync"]["errors"])
+    return result
 
 
 def add_connection(conn, access_url, label=""):
@@ -370,11 +377,42 @@ def _import_transactions(conn, account_id, txns, learned):
     return imported, matched
 
 
-def sync_connection(conn, connection_id, today=None):
+def auto_assign(conn, connection_id):
+    """Give every undecided bank account somewhere to go, so its data shows up right away.
+
+    Links it to an existing, not-yet-linked account with the same name, or creates a new
+    account. Accounts the user marked "Don't import" are left alone, and any choice can be
+    changed later on the Accounts page. Returns the names of the local accounts used.
+    """
+    used = []
+    for r in rows(conn.execute("SELECT * FROM remote_accounts WHERE connection_id = ?"
+                               " AND account_id IS NULL AND ignored = 0", (connection_id,))):
+        names = [r["name"]] + (["%s (%s)" % (r["name"], r["institution"])] if r["institution"] else [])
+        match = None
+        for name in names:
+            match = row(conn.execute(
+                "SELECT id, name FROM accounts WHERE name = ? COLLATE NOCASE AND archived = 0"
+                " AND id NOT IN (SELECT account_id FROM remote_accounts WHERE account_id IS NOT NULL)",
+                (name,)))
+            if match:
+                break
+        if match:
+            link_remote(conn, r["id"], "link", match["id"])
+            used.append(match["name"])
+        else:
+            link_remote(conn, r["id"], "new")
+            acct = row(conn.execute("SELECT a.name FROM remote_accounts r JOIN accounts a"
+                                    " ON a.id = r.account_id WHERE r.id = ?", (r["id"],)))
+            used.append(acct["name"])
+    return used
+
+
+def sync_connection(conn, connection_id, today=None, _rerun=False):
     c = row(conn.execute("SELECT * FROM connections WHERE id = ?", (connection_id,)))
     if c is None:
         raise NotFound("connection %s not found" % connection_id)
     today = today or dt.date.today()
+    added = auto_assign(conn, connection_id)
     end = today + dt.timedelta(days=1)
     if c["last_sync"]:
         start = dt.date.fromisoformat(c["last_sync"][:10]) - dt.timedelta(days=OVERLAP_DAYS)
@@ -388,9 +426,9 @@ def sync_connection(conn, connection_id, today=None):
         start = min(start, today - dt.timedelta(days=FIRST_SYNC_DAYS))
 
     result = {"connection_id": connection_id, "label": c["label"], "imported": 0, "matched": 0,
-              "new_accounts": 0, "errors": []}
+              "added_accounts": added, "errors": []}
     learned = _payee_category_map(conn)
-    seen_new = set()
+    discovered = []
     try:
         remote_by_id = {}
         for w_start, w_end in _windows(start, end):
@@ -400,14 +438,17 @@ def sync_connection(conn, connection_id, today=None):
             _upsert_remote(conn, connection_id, accounts)
             for a in accounts:
                 remote_by_id.setdefault(str(a["id"]), []).extend(a.get("transactions") or [])
+        # Bank accounts that appeared for the first time in this download.
+        before = {r["id"] for r in rows(conn.execute(
+            "SELECT id FROM remote_accounts WHERE connection_id = ? AND account_id IS NOT NULL",
+            (connection_id,)))}
+        discovered = auto_assign(conn, connection_id)
         for r in rows(conn.execute("SELECT * FROM remote_accounts WHERE connection_id = ?",
                                    (connection_id,))):
-            if r["ignored"]:
+            if r["ignored"] or not r["account_id"]:
                 continue
-            if not r["account_id"]:
-                if r["remote_id"] in remote_by_id and r["id"] not in seen_new:
-                    seen_new.add(r["id"])
-                continue
+            if r["id"] not in before:
+                continue  # just discovered: the follow-up pass fetches its full history
             imp, mat = _import_transactions(conn, r["account_id"], remote_by_id.get(r["remote_id"], []), learned)
             result["imported"] += imp
             result["matched"] += mat
@@ -419,7 +460,6 @@ def sync_connection(conn, connection_id, today=None):
                                          " WHERE account_id = ?", (r["account_id"],)).fetchone()[0]
                     conn.execute("UPDATE accounts SET opening_balance_cents = ? WHERE id = ?",
                                  (r["balance_cents"] - total, r["account_id"]))
-        result["new_accounts"] = len(seen_new)
         conn.execute("UPDATE connections SET last_sync = ?, last_error = ? WHERE id = ?",
                      (dt.datetime.now().isoformat(timespec="seconds"),
                       "; ".join(result["errors"]) or None, connection_id))
@@ -432,6 +472,13 @@ def sync_connection(conn, connection_id, today=None):
         conn.execute("UPDATE connections SET last_error = ? WHERE id = ?", (str(e), connection_id))
         conn.commit()
         result["errors"].append(str(e))
+        return result
+    if discovered and not _rerun:
+        more = sync_connection(conn, connection_id, today, _rerun=True)
+        result["imported"] += more["imported"]
+        result["matched"] += more["matched"]
+        result["added_accounts"] += discovered
+        result["errors"] += [e for e in more["errors"] if e not in result["errors"]]
     return result
 
 
