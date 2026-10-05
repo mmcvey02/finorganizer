@@ -716,11 +716,21 @@ function renderUpdateBanner() {
   if (!u || !u.available || pref("dismissedUpdate", "") === u.latest) { b.hidden = true; return; }
   b.hidden = false;
   b.innerHTML = `<span>FinOrganizer <strong>${esc(u.latest)}</strong> is available (you have ${esc(u.current)}).</span>
-    <button id="upd-now">${u.can_install && desktop() ? "Update now" : "Download"}</button>
+    <a class="btn" id="upd-now" href="${esc(u.page)}" target="_blank" rel="noopener">${u.can_install && desktop() ? "Update now" : "Download"}</a>
     <a href="#settings">What's new</a>
     <button class="ghost" id="upd-later">Not now</button>`;
-  $("#upd-now", b).onclick = installUpdate;
+  wireUpdateLink($("#upd-now", b), u);
   $("#upd-later", b).onclick = () => { setPref("dismissedUpdate", u.latest); renderUpdateBanner(); };
+}
+
+// Update buttons are real links to the release page, so they work even if the desktop
+// bridge isn't available; when it is, the app installs (Windows) or opens the page itself.
+function wireUpdateLink(el, u) {
+  el.onclick = (e) => {
+    if (u.can_install && desktop()) { e.preventDefault(); installUpdate(); }
+    else if (desktop() && desktop().open_url) { e.preventDefault(); openExternal(u.page); }
+    // otherwise let the link open normally (browser tab / the window's external-link handling)
+  };
 }
 
 async function installUpdate() {
@@ -730,12 +740,12 @@ async function installUpdate() {
     openExternal(u.page);
     return;
   }
-  $$("#upd-now, #settings-update").forEach((x) => { x.disabled = true; x.textContent = "Downloading…"; });
+  $$("#upd-now, #settings-update").forEach((x) => { x.style.pointerEvents = "none"; x.textContent = "Downloading…"; });
   toast("Downloading the update. FinOrganizer will restart by itself.");
   const r = await desktop().install_update();
   toast(r.message, !r.ok);
   if (!r.ok) {
-    $$("#upd-now, #settings-update").forEach((x) => { x.disabled = false; x.textContent = "Try again"; });
+    $$("#upd-now, #settings-update").forEach((x) => { x.style.pointerEvents = ""; x.textContent = "Try again"; });
     if (r.page) openExternal(r.page);
   }
 }
@@ -750,7 +760,7 @@ pages.settings = async () => {
       <div id="update-status" class="muted" style="margin:10px 0"></div>
       <div class="filters">
         <button class="ghost" id="check-now">Check for updates</button>
-        <button id="settings-update" hidden>Update now</button>
+        <a class="btn" id="settings-update" target="_blank" rel="noopener" hidden>Update now</a>
         <label class="check"><input type="checkbox" id="auto-check" ${auto ? "checked" : ""}> Check automatically when FinOrganizer opens</label>
       </div>
       <div id="update-notes"></div>
@@ -763,7 +773,8 @@ pages.settings = async () => {
     const btn = $("#settings-update");
     btn.hidden = !u.available;
     btn.textContent = u.can_install && desktop() ? `Update to ${u.latest}` : "Download the new version";
-    btn.onclick = installUpdate;
+    btn.href = u.page;
+    wireUpdateLink(btn, u);
     $("#update-status").innerHTML = u.error ? `<span class="neg">Couldn't check: ${esc(u.error)}</span>`
       : u.available ? `<strong>Version ${esc(u.latest)} is available.</strong>` : "You have the latest version.";
     $("#update-notes").innerHTML = u.available && u.notes ? `<h2 style="margin-top:12px">What's new</h2><div class="notes">${esc(u.notes)}</div>` : "";
@@ -1339,6 +1350,11 @@ function initToolbar() {
 }
 
 window.addEventListener("hashchange", route);
+// The desktop bridge can become ready after the first render: refresh update buttons then.
+window.addEventListener("pywebviewready", () => {
+  renderUpdateBanner();
+  if (location.hash.startsWith("#settings")) route();
+});
 // Failed actions already show their error in a toast (see attempt()); don't also
 // surface them as uncaught errors.
 window.addEventListener("unhandledrejection", (e) => {

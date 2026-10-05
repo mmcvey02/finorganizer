@@ -229,3 +229,4 @@ a.ghost-link:hover { background: var(--surface-2); }
 button.pill { border: none; cursor: pointer; font: inherit; font-size: 11px; padding: 1px 7px;
   background: var(--surface-2); color: var(--text-2); }
 button.pill:hover { background: var(--border); }
+a.btn { text-decoration: none; display: inline-block; line-height: 1.45; }
