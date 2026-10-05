@@ -15,7 +15,6 @@ import binascii
 import datetime as dt
 import json
 import re
-import ssl
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -25,6 +24,7 @@ from .db import row, rows
 from .ledger import NotFound, add_account, get_account
 from .money import to_cents
 from . import __version__
+from .net import describe_ssl_error, ssl_context
 
 TIMEOUT = 60
 FIRST_SYNC_DAYS = 90      # history fetched the first time an account is linked
@@ -58,14 +58,14 @@ def _body_hint(err):
 def _open(req):
     req.add_header("User-Agent", USER_AGENT)
     try:
-        return urllib.request.urlopen(req, timeout=TIMEOUT, context=ssl.create_default_context())
+        return urllib.request.urlopen(req, timeout=TIMEOUT, context=ssl_context())
     except urllib.error.HTTPError as e:
         hint = _body_hint(e)
         if e.code in (401, 403):
             raise SyncError("SimpleFIN refused access (HTTP %d%s)" % (e.code, hint), e.code)
         raise SyncError("SimpleFIN returned HTTP %d%s" % (e.code, hint), e.code)
     except urllib.error.URLError as e:
-        raise SyncError("could not reach SimpleFIN: %s" % e.reason)
+        raise SyncError("could not reach SimpleFIN: %s" % describe_ssl_error(e))
 
 
 # Characters that sneak in when copying from web pages and emails.

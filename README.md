@@ -53,7 +53,7 @@ Neither needs Python installed.
 To build them yourself on a Windows machine:
 
 ```bash
-pip install pyinstaller pywebview
+pip install pyinstaller pywebview truststore certifi
 python packaging/build_exe.py      # output: dist\FinOrganizer.exe and dist\FinOrganizer-cli.exe
 ```
 
@@ -82,7 +82,7 @@ The same desktop app is built for macOS as a disk image, in two versions:
   into Applications again, replacing the old copy. Your data is kept. (Installing updates
   automatically is Windows-only for now.)
 
-To build it yourself on a Mac: `pip install pyinstaller pywebview`,
+To build it yourself on a Mac: `pip install pyinstaller pywebview truststore certifi`,
 `python packaging/build_exe.py`, then `packaging/make_dmg.sh dist/FinOrganizer.dmg`.
 
 ## Profiles, printing and bank connections

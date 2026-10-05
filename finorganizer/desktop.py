@@ -137,6 +137,7 @@ def run(db_path=None, smoke_test=False):
     def smoke(window):
         """CI check: wait for the dashboard to render, then close the window."""
         deadline = time.time() + 60
+        ready = False
         while time.time() < deadline:
             try:
                 ready = window.evaluate_js(
@@ -147,6 +148,22 @@ def run(db_path=None, smoke_test=False):
                 outcome["ok"] = True
                 break
             time.sleep(0.5)
+        # A packaged app must also be able to make verified HTTPS connections (bank sync,
+        # updates). Rate limits or outages don't fail the check; certificate errors do.
+        from . import net
+        info = updater.check()
+        tls_broken = bool(info["error"]) and "verif" in info["error"].lower()
+        if tls_broken:
+            outcome["ok"] = False
+        try:
+            with open(_log_path(db_path), "a", encoding="utf-8") as f:
+                f.write("smoke test: window %s; HTTPS via %s: %s\n" % (
+                    "rendered" if ready else "did not render", net.SOURCE,
+                    "FAILED: " + info["error"] if tls_broken else
+                    ("ok (latest release %s)" % info["latest"] if not info["error"] else
+                     "not verified (%s)" % info["error"])))
+        except OSError:
+            pass
         window.destroy()
 
     storage = os.path.join(_data_dir(profiles), "webview")

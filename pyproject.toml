@@ -11,7 +11,7 @@ requires-python = ">=3.9"
 dependencies = []
 
 [project.optional-dependencies]
-desktop = ["pywebview>=5"]
+desktop = ["pywebview>=5", "truststore>=0.9", "certifi"]
 
 [project.scripts]
 finorganizer = "finorganizer.cli:main"

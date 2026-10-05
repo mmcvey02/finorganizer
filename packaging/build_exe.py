@@ -1,6 +1,6 @@
 """Build the FinOrganizer programs with PyInstaller.
 
-    pip install pyinstaller pywebview
+    pip install pyinstaller pywebview truststore certifi
     python packaging/build_exe.py            # everything for this platform
     python packaging/build_exe.py desktop    # just the desktop app
     python packaging/build_exe.py cli        # just the command-line tool (Windows/Linux)
@@ -39,6 +39,8 @@ TARGETS = {
         "--name", "FinOrganizer",
         "--windowed",  # no console window; errors are shown in a message box and logged
         "--collect-all", "webview",
+        "--hidden-import", "truststore",
+        "--hidden-import", "certifi",
     ] + (
         # macOS: a normal .app bundle (one-file .apps are deprecated by PyInstaller).
         ["--onedir", "--osx-bundle-identifier", "io.github.mmcvey02.finorganizer"]
@@ -50,6 +52,8 @@ TARGETS = {
         "--onefile",
         "--console",  # shows the app address; closing it stops the server
         "--exclude-module", "webview",
+        "--hidden-import", "truststore",
+        "--hidden-import", "certifi",
     ],
 }
 

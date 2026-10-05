@@ -19,7 +19,6 @@ import hashlib
 import json
 import os
 import re
-import ssl
 import subprocess
 import sys
 import urllib.error
@@ -27,6 +26,7 @@ import urllib.parse
 import urllib.request
 
 from . import __version__
+from .net import describe_ssl_error, ssl_context
 
 REPO = "mmcvey02/finorganizer"
 LATEST_URL = "https://api.github.com/repos/%s/releases/latest" % REPO
@@ -67,7 +67,7 @@ def _request(url, accept="application/vnd.github+json"):
     from .banksync import USER_AGENT
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Accept": accept})
     try:
-        return urllib.request.urlopen(req, timeout=TIMEOUT, context=ssl.create_default_context())
+        return urllib.request.urlopen(req, timeout=TIMEOUT, context=ssl_context())
     except urllib.error.HTTPError as e:
         if e.code == 404:
             raise UpdateError("no published releases found (the repository may be private, "
@@ -76,7 +76,7 @@ def _request(url, accept="application/vnd.github+json"):
             raise UpdateError("GitHub is rate-limiting update checks; try again later")
         raise UpdateError("GitHub returned HTTP %d" % e.code)
     except urllib.error.URLError as e:
-        raise UpdateError("couldn't reach GitHub: %s" % e.reason)
+        raise UpdateError("couldn't reach GitHub: %s" % describe_ssl_error(e))
 
 
 def check():

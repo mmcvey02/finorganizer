@@ -32,7 +32,7 @@ jobs:
 
       - name: Build FinOrganizer.exe and FinOrganizer-cli.exe
         run: |
-          python -m pip install --upgrade pip pyinstaller pywebview
+          python -m pip install --upgrade pip pyinstaller pywebview truststore certifi
           python packaging/build_exe.py
 
       - name: Smoke-test the command-line executable
@@ -58,7 +58,7 @@ jobs:
           if (-not $p.WaitForExit(120000)) { Stop-Process -Id $p.Id -Force; Write-Error "desktop app did not exit"; exit 1 }
           Write-Host "desktop app exit code: $($p.ExitCode)"
           $log = Join-Path $env:RUNNER_TEMP "finorganizer-desktop.log"
-          if (Test-Path $log) { Get-Content $log }
+          if (Test-Path $log) { Get-Content $log } else { Write-Error "smoke test wrote no log"; exit 1 }
           if ($p.ExitCode -ne 0) { exit 1 }
           Start-Sleep -Seconds 2
           if (Get-Process -Name FinOrganizer -ErrorAction SilentlyContinue) { Write-Error "process still running after window closed"; exit 1 }
@@ -100,7 +100,7 @@ jobs:
 
       - name: Build FinOrganizer.app
         run: |
-          python -m pip install --upgrade pip pyinstaller pywebview
+          python -m pip install --upgrade pip pyinstaller pywebview truststore certifi
           python packaging/build_exe.py desktop
 
       - name: Smoke-test the app (opens its window, renders, closes, exits)
@@ -112,7 +112,7 @@ jobs:
           if kill -0 $pid 2>/dev/null; then kill -9 $pid; echo "::error::app did not exit"; exit 1; fi
           wait $pid; code=$?
           echo "app exit code: $code"
-          [ -f "$RUNNER_TEMP/finorganizer-desktop.log" ] && cat "$RUNNER_TEMP/finorganizer-desktop.log"
+          cat "$RUNNER_TEMP/finorganizer-desktop.log" || { echo "::error::smoke test wrote no log"; exit 1; }
           [ "$code" = 0 ] || exit 1
           sleep 2
           if curl -s --max-time 3 http://127.0.0.1:8765/ >/dev/null; then echo "::error::server still running"; exit 1; fi
