@@ -540,12 +540,13 @@ pages.accounts = async (params) => {
 async function connectBank() {
   const v = await formDialog("Connect a bank (SimpleFIN)", [
     { name: "token", label: "SimpleFIN setup token", type: "textarea", required: true, wide: true,
-      hint: "1) Sign up at beta-bridge.simplefin.org and connect your banks there. 2) Click 'New connection' to create a setup token. 3) Paste it here. Each token works once. FinOrganizer only gets read-only access and can never move money." },
+      hint: "1) Sign up at beta-bridge.simplefin.org and connect your banks there. 2) Under Apps, click 'New connection' to create a setup token. 3) Copy the whole token and paste it here. Each token works once. FinOrganizer only gets read-only access and can never move money." },
     { name: "label", label: "Name for this connection (optional)", wide: true },
   ], "Connect");
   if (!v) return false;
-  await attempt(() => api("POST", "/api/connections", { setup_token: v.token, label: v.label }),
-    "Connected. Choose what each bank account should feed.");
+  const r = await attempt(() => api("POST", "/api/connections", { setup_token: v.token, label: v.label }));
+  if (r.warning) toast(r.warning, true);
+  else toast("Connected. Choose what each bank account should feed.");
   return true;
 }
 

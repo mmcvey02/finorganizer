@@ -235,8 +235,8 @@ def build_router(app=None):
 
     # linked bank connections (SimpleFIN)
     r.add("GET", "/api/connections", lambda c, q, b: banksync.list_connections(c))
-    r.add("POST", "/api/connections", lambda c, q, b: {"id": banksync.connect(
-        c, b.get("setup_token") or "", b.get("label") or "")})
+    r.add("POST", "/api/connections", lambda c, q, b: banksync.connect(
+        c, b.get("setup_token") or "", b.get("label") or ""))
     r.add("DELETE", r"/api/connections/(\d+)", lambda c, q, b, i: banksync.delete_connection(c, i))
     r.add("POST", "/api/connections/sync", lambda c, q, b: banksync.sync(c))
     r.add("PUT", r"/api/remote-accounts/(\d+)", lambda c, q, b, i: banksync.link_remote(

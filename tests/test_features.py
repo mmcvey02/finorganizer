@@ -31,6 +31,7 @@ class FakeSimpleFIN:
     def __init__(self):
         self.claimed = set()
         self.requests = []
+        self.fail_accounts = False  # simulate an outage right after a token is claimed
         self.accounts = [
             {"org": {"name": "First Bank", "domain": "firstbank.example"}, "id": "CHK-1",
              "name": "Checking", "currency": "USD", "balance": "1500.00",
@@ -63,7 +64,16 @@ class FakeSimpleFIN:
                 self.end_headers()
                 self.wfile.write(data)
 
+            def _blocked(self):
+                # Like some hosting firewalls: reject the default Python user agent.
+                if "Python-urllib" in (self.headers.get("User-Agent") or ""):
+                    self._send(403, "<html><body>Access denied</body></html>", "text/html")
+                    return True
+                return False
+
             def do_POST(self):
+                if self._blocked():
+                    return
                 if self.path.startswith("/claim/"):
                     tok = self.path.rsplit("/", 1)[1]
                     if tok in fake.claimed:
@@ -73,6 +83,10 @@ class FakeSimpleFIN:
                 self._send(404, "{}")
 
             def do_GET(self):
+                if self._blocked():
+                    return
+                if fake.fail_accounts:
+                    return self._send(503, "Service Unavailable", "text/plain")
                 url = urlparse(self.path)
                 expected = "Basic " + base64.b64encode(b"user:s3cret").decode()
                 if self.headers.get("Authorization") != expected:
@@ -120,7 +134,7 @@ class BankSyncTests(unittest.TestCase):
         return next(r for r in conn["accounts"] if r["name"] == name)
 
     def test_full_flow(self):
-        cid = banksync.connect(self.c, self.fake.token("flow"))
+        cid = banksync.connect(self.c, self.fake.token("flow"))["id"]
         conns = banksync.list_connections(self.c)
         self.assertEqual(conns[0]["label"], "CardCo, First Bank")
         self.assertEqual(conns[0]["host"], "http://127.0.0.1")  # credentials never exposed
@@ -164,7 +178,7 @@ class BankSyncTests(unittest.TestCase):
         self.assertEqual((r["imported"], r["matched"]), (0, 0))
 
     def test_requests_are_windowed(self):
-        cid = banksync.connect(self.c, self.fake.token("windows"))
+        cid = banksync.connect(self.c, self.fake.token("windows"))["id"]
         self.fake.requests.clear()
         banksync.sync_connection(self.c, cid, today=TODAY)
         spans = [(int(q["end-date"]) - int(q["start-date"])) / 86400 for q in self.fake.requests]
@@ -185,17 +199,61 @@ class BankSyncTests(unittest.TestCase):
     def test_token_errors(self):
         with self.assertRaises(ValueError):
             banksync.connect(self.c, "not a token!")
+        with self.assertRaisesRegex(ValueError, "web address"):
+            banksync.connect(self.c, "https://beta-bridge.simplefin.org/")
         banksync.connect(self.c, self.fake.token("once"))
-        with self.assertRaises(banksync.SyncError):
+        with self.assertRaisesRegex(banksync.SyncError, "already used"):
             banksync.connect(self.c, self.fake.token("once"))
+
+    def test_pasted_token_variants_are_accepted(self):
+        claim = "http://127.0.0.1:%d/claim/" % self.fake.port
+        std = lambda n: base64.b64encode((claim + n).encode()).decode()  # noqa: E731
+        variants = {
+            "quoted": '"%s"' % std("q"),
+            "labelled": "Setup Token: %s" % std("l"),
+            "wrapped": "\n  %s\n" % "\n".join([std("w")[i:i + 20] for i in range(0, len(std("w")), 20)]),
+            "unpadded": std("pad-it").rstrip("="),
+            "urlsafe": base64.urlsafe_b64encode((claim + "u?x=>>>").encode()).decode(),
+            "invisible": "\u200b" + std("z") + "\ufeff",
+            "claim url": claim + "direct",
+        }
+        for name, text in variants.items():
+            with self.subTest(name):
+                c = db.connect(":memory:")
+                result = banksync.connect(c, text)
+                self.assertIsNone(result["warning"])
+                self.assertEqual(len(banksync.list_connections(c)[0]["accounts"]), 2)
+
+    def test_pasting_an_access_url_works(self):
+        access = "http://user:s3cret@127.0.0.1:%d/simplefin" % self.fake.port
+        r = banksync.connect(self.c, access)
+        self.assertIsNone(r["warning"])
+        # Pasting the same access again doesn't create a duplicate connection.
+        self.assertEqual(banksync.connect(self.c, access)["id"], r["id"])
+        self.assertEqual(len(banksync.list_connections(self.c)), 1)
+
+    def test_claimed_access_survives_an_outage(self):
+        """A token can only be claimed once, so the access must be kept even if loading fails."""
+        self.fake.fail_accounts = True
+        try:
+            r = banksync.connect(self.c, self.fake.token("outage"))
+        finally:
+            self.fake.fail_accounts = False
+        self.assertIn("couldn't load your accounts", r["warning"])
+        self.assertIn("503", banksync.list_connections(self.c)[0]["last_error"])
+        # Later, syncing works with the saved access; no new token needed.
+        result = banksync.sync_connection(self.c, r["id"], today=TODAY)
+        self.assertEqual(result["errors"], [])
+        self.assertEqual(result["new_accounts"], 2)
+        self.assertIsNone(banksync.list_connections(self.c)[0]["last_error"])
 
     def test_revoked_access_is_reported(self):
         good = "http://user:s3cret@127.0.0.1:%d/simplefin" % self.fake.port
-        cid = banksync.add_connection(self.c, good)
+        cid = banksync.add_connection(self.c, good)["id"]
         self.c.execute("UPDATE connections SET access_url = ?", (good.replace("s3cret", "wrong"),))
         r = banksync.sync_connection(self.c, cid, today=TODAY)
         self.assertIn("refused", r["errors"][0])
-        self.assertIn("refused", banksync.list_connections(self.c)[0]["last_error"])
+        self.assertIn("new setup token", banksync.list_connections(self.c)[0]["last_error"])
 
 
 class ProfileTests(unittest.TestCase):

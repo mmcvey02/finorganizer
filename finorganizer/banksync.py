@@ -14,6 +14,7 @@ import base64
 import binascii
 import datetime as dt
 import json
+import re
 import ssl
 import urllib.error
 import urllib.parse
@@ -23,6 +24,7 @@ from .csvio import _payee_category_map
 from .db import row, rows
 from .ledger import NotFound, add_account, get_account
 from .money import to_cents
+from . import __version__
 
 TIMEOUT = 60
 FIRST_SYNC_DAYS = 90      # history fetched the first time an account is linked
@@ -32,43 +34,94 @@ MATCH_DAYS = 3            # a manual entry this close in date with the same amou
 
 
 class SyncError(Exception):
-    pass
+    def __init__(self, message, status=None):
+        super().__init__(message)
+        self.status = status
 
 
 # ----------------------------------------------------------------- HTTP layer
 
+# Some hosting firewalls reject the default "Python-urllib" agent, so identify ourselves.
+USER_AGENT = "FinOrganizer/%s (+https://github.com/mmcvey02/finorganizer)" % __version__
+
+
+def _body_hint(err):
+    try:
+        text = err.read(400).decode("utf-8", "replace")
+    except Exception:
+        return ""
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = " ".join(text.split())
+    return (": " + text[:160]) if text else ""
+
+
 def _open(req):
+    req.add_header("User-Agent", USER_AGENT)
     try:
         return urllib.request.urlopen(req, timeout=TIMEOUT, context=ssl.create_default_context())
     except urllib.error.HTTPError as e:
+        hint = _body_hint(e)
         if e.code in (401, 403):
-            raise SyncError("the bank connection was refused (access revoked or expired); "
-                            "reconnect it with a new setup token")
-        raise SyncError("SimpleFIN returned HTTP %d" % e.code)
+            raise SyncError("SimpleFIN refused access (HTTP %d%s)" % (e.code, hint), e.code)
+        raise SyncError("SimpleFIN returned HTTP %d%s" % (e.code, hint), e.code)
     except urllib.error.URLError as e:
         raise SyncError("could not reach SimpleFIN: %s" % e.reason)
 
 
+# Characters that sneak in when copying from web pages and emails.
+_INVISIBLE = dict.fromkeys(map(ord, "\u200b\u200c\u200d\u2060\ufeff\u00a0"), None)
+
+
+def parse_setup_input(text):
+    """Work out what the user pasted. Returns ("claim", claim_url) or ("access", access_url).
+
+    Accepts a setup token (standard or URL-safe base64, with or without padding, even
+    wrapped in quotes or after a "Setup token:" label), a claim URL, or an access URL.
+    """
+    t = (text or "").translate(_INVISIBLE).strip()
+    url = re.search(r"https?://[^\s\"'<>`]+", t)
+    if url:
+        found = url.group(0).rstrip(".,;)")
+        parts = urllib.parse.urlsplit(found)
+        if "/claim/" in parts.path:
+            return "claim", found
+        if parts.username:
+            return "access", found
+        raise ValueError("that's a web address, not a setup token. On SimpleFIN Bridge, create a "
+                         "new connection and copy the long setup token it shows")
+    candidates = sorted(re.findall(r"[A-Za-z0-9+/_=-]{16,}", "".join(t.split())), key=len, reverse=True)
+    for cand in candidates:
+        body = cand.rstrip("=")
+        body += "=" * (-len(body) % 4)
+        for decode in (base64.b64decode, base64.urlsafe_b64decode):
+            try:
+                decoded = decode(body).decode("utf-8").strip()
+            except (binascii.Error, UnicodeDecodeError, ValueError):
+                continue
+            if decoded.startswith(("https://", "http://")):
+                kind = "access" if urllib.parse.urlsplit(decoded).username else "claim"
+                return kind, decoded
+    raise ValueError("that doesn't look like a SimpleFIN setup token. Copy the whole token "
+                     "(a long string of letters and numbers) from SimpleFIN Bridge and paste it again")
+
+
 def claim_setup_token(token):
-    """Exchange a one-time setup token for a long-lived access URL."""
-    token = "".join((token or "").split())
-    try:
-        claim_url = base64.b64decode(token + "=" * (-len(token) % 4), validate=True).decode()
-    except (binascii.Error, UnicodeDecodeError):
-        raise ValueError("that doesn't look like a SimpleFIN setup token")
-    if not claim_url.startswith(("https://", "http://")):
-        raise ValueError("that doesn't look like a SimpleFIN setup token")
-    req = urllib.request.Request(claim_url, data=b"", method="POST",
-                                 headers={"Content-Length": "0"})
+    """Exchange a one-time setup token (or claim URL) for a long-lived access URL."""
+    kind, url = parse_setup_input(token)
+    if kind == "access":
+        return url
+    req = urllib.request.Request(url, data=b"", method="POST", headers={"Content-Length": "0"})
     try:
         with _open(req) as res:
-            access_url = res.read().decode().strip()
+            access_url = res.read().decode("utf-8", "replace").strip()
     except SyncError as e:
-        if "refused" in str(e):
-            raise SyncError("this setup token was already used or is invalid; create a new one")
+        if e.status == 403:
+            raise SyncError("SimpleFIN says this setup token was already used or has been revoked. "
+                            "Each token works only once. Create a new one on SimpleFIN Bridge "
+                            "and paste that (%s)" % e, e.status)
         raise
     if not access_url.startswith(("https://", "http://")):
-        raise SyncError("unexpected response when claiming the setup token")
+        raise SyncError("unexpected response when claiming the setup token: %r" % access_url[:80])
     return access_url
 
 
@@ -154,22 +207,47 @@ def _upsert_remote(conn, connection_id, accounts):
 
 
 def connect(conn, setup_token, label=""):
-    """Claim a setup token, save the connection and discover its accounts."""
+    """Claim a setup token and save the connection, then discover its accounts.
+
+    The access URL is saved *before* contacting the bank data endpoint: a setup token
+    can only be claimed once, so a later network hiccup must not throw the access away.
+    Returns ``{"id": connection_id, "warning": message_or_None}``.
+    """
     access_url = claim_setup_token(setup_token)
     return add_connection(conn, access_url, label)
 
 
 def add_connection(conn, access_url, label=""):
-    payload = fetch_accounts(access_url, balances_only=True)
+    existing = row(conn.execute("SELECT id FROM connections WHERE access_url = ?", (access_url,)))
+    if existing:
+        cid = existing["id"]
+    else:
+        cid = conn.execute("INSERT INTO connections (label, access_url) VALUES (?, ?)",
+                           (label or "SimpleFIN", access_url)).lastrowid
+        conn.commit()
+    try:
+        payload = fetch_accounts(access_url, balances_only=True)
+    except SyncError as e:
+        msg = "Connected, but couldn't load your accounts yet (%s). Try Sync now in a minute." % e
+        conn.execute("UPDATE connections SET last_error = ? WHERE id = ?", (str(e), cid))
+        conn.commit()
+        return {"id": cid, "warning": msg}
     accounts = payload.get("accounts") or []
     if not label:
         orgs = sorted({(a.get("org") or {}).get("name") or "" for a in accounts} - {""})
         label = ", ".join(orgs)[:80] or "SimpleFIN"
-    cid = conn.execute("INSERT INTO connections (label, access_url) VALUES (?, ?)",
-                       (label, access_url)).lastrowid
+    errors = _errors(payload)
+    conn.execute("UPDATE connections SET label = ?, last_error = ? WHERE id = ?",
+                 (label, "; ".join(errors) or None, cid))
     conn.commit()
     _upsert_remote(conn, cid, accounts)
-    return cid
+    warning = None
+    if errors:
+        warning = "SimpleFIN reported: " + "; ".join(errors)
+    elif not accounts:
+        warning = ("Connected, but SimpleFIN didn't return any accounts. Make sure you've linked "
+                   "your banks on the SimpleFIN Bridge site, then click Sync now.")
+    return {"id": cid, "warning": warning}
 
 
 def delete_connection(conn, connection_id):
@@ -348,6 +426,9 @@ def sync_connection(conn, connection_id, today=None):
         conn.commit()
     except SyncError as e:
         conn.rollback()
+        if e.status in (401, 403):
+            e = SyncError("%s. Access was revoked or expired: disconnect this bank and connect "
+                          "it again with a new setup token" % e, e.status)
         conn.execute("UPDATE connections SET last_error = ? WHERE id = ?", (str(e), connection_id))
         conn.commit()
         result["errors"].append(str(e))

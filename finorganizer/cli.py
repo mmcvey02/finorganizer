@@ -103,8 +103,11 @@ def cmd_summary(conn, a):
 def cmd_bank(conn, a):
     from . import banksync as B
     if a.action == "connect":
-        cid = B.connect(conn, a.token, a.label or "")
-        print("Connected (#%d). Choose what each bank account should feed:" % cid)
+        result = B.connect(conn, a.token, a.label or "")
+        print("Connected (#%d)." % result["id"])
+        if result["warning"]:
+            print("Note: " + result["warning"])
+        print("Choose what each bank account should feed:")
         _bank_list(conn)
         print("\nThen run: finorganizer bank link <ID> --new | --account NAME | --ignore")
     elif a.action == "link":
