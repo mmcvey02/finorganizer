@@ -21,7 +21,7 @@ import urllib.request
 
 from .csvio import _payee_category_map
 from .db import row, rows
-from .ledger import NotFound, add_account, get_account
+from .ledger import NotFound, add_account, detect_transfers, get_account
 from .money import to_cents
 from . import __version__
 from .net import describe_ssl_error, ssl_context
@@ -464,6 +464,8 @@ def sync_connection(conn, connection_id, today=None, _rerun=False):
                      (dt.datetime.now().isoformat(timespec="seconds"),
                       "; ".join(result["errors"]) or None, connection_id))
         conn.commit()
+        # Payments between your own linked accounts arrive twice; pair them up as transfers.
+        result["transfers_linked"] = detect_transfers(conn)
     except SyncError as e:
         conn.rollback()
         if e.status in (401, 403):
@@ -477,6 +479,7 @@ def sync_connection(conn, connection_id, today=None, _rerun=False):
         more = sync_connection(conn, connection_id, today, _rerun=True)
         result["imported"] += more["imported"]
         result["matched"] += more["matched"]
+        result["transfers_linked"] = result.get("transfers_linked", 0) + more.get("transfers_linked", 0)
         result["added_accounts"] += discovered
         result["errors"] += [e for e in more["errors"] if e not in result["errors"]]
     return result

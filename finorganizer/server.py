@@ -114,6 +114,7 @@ def build_router(app=None):
     r.add("POST", "/api/transactions", add_tx)
     r.add("PUT", r"/api/transactions/(\d+)", update_tx)
     r.add("DELETE", r"/api/transactions/(\d+)", lambda c, q, b, i: L.delete_transaction(c, i))
+    r.add("POST", r"/api/transactions/(\d+)/unlink-transfer", lambda c, q, b, i: L.unlink_transfer(c, i))
     r.add("POST", "/api/transfers", lambda c, q, b: {"ids": L.add_transfer(
         c, _int(b.get("from_account_id")), _int(b.get("to_account_id")), b.get("date") or today(),
         _int(b.get("amount_cents")), b.get("memo", ""))})

@@ -59,6 +59,14 @@ class Api:
         url = "%s/summary?print=1%s" % (self._url, "&month=" + month if month else "")
         webview.create_window("Financial Summary", url, width=900, height=820)
 
+    def open_url(self, url):
+        """Open an outside web page in the user's normal browser."""
+        import webbrowser
+        if isinstance(url, str) and url.startswith(("https://", "http://")):
+            webbrowser.open(url)
+            return True
+        return False
+
     def install_update(self):
         """Download the latest version, then close so it can start in our place."""
         info = updater.check()

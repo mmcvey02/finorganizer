@@ -91,19 +91,21 @@ def months_between(start_month, end_month):
     return out
 
 
-def next_occurrence(date, frequency):
+def next_occurrence(date, frequency, anchor_day=None):
+    """The following due date. ``anchor_day`` is the intended day of the month, so a
+    bill due on the 31st falls on Feb 28 and then returns to Mar 31 instead of drifting."""
     date = parse_date(date)
     if frequency == "weekly":
         return date + dt.timedelta(days=7)
     if frequency == "biweekly":
         return date + dt.timedelta(days=14)
-    if frequency == "monthly":
-        return add_months(date, 1)
-    if frequency == "quarterly":
-        return add_months(date, 3)
-    if frequency == "yearly":
-        return add_months(date, 12)
-    raise ValueError("unknown frequency: %r" % frequency)
+    months = {"monthly": 1, "quarterly": 3, "yearly": 12}.get(frequency)
+    if months is None:
+        raise ValueError("unknown frequency: %r" % frequency)
+    nxt = add_months(date, months)
+    if anchor_day:
+        nxt = nxt.replace(day=min(int(anchor_day), calendar.monthrange(nxt.year, nxt.month)[1]))
+    return nxt
 
 
 # Approximate occurrences per month, used for normalising recurring items.

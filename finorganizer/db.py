@@ -148,6 +148,7 @@ CREATE TABLE IF NOT EXISTS remote_accounts (
 # Columns added after the first release; applied to existing databases on open.
 MIGRATIONS = [
     ("transactions", "external_id", "ALTER TABLE transactions ADD COLUMN external_id TEXT"),
+    ("recurring", "anchor_day", "ALTER TABLE recurring ADD COLUMN anchor_day INTEGER"),
 ]
 
 DEFAULT_CATEGORIES = [

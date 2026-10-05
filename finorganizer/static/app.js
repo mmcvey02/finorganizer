@@ -448,7 +448,7 @@ pages.transactions = async (params) => {
           <td>${esc(t.date)}</td>
           <td>${esc(t.payee)}${t.external_id ? ' <span class="pill info" title="Downloaded from your bank">bank</span>' : ""}${t.memo ? `<div class="muted small">${esc(t.memo)}</div>` : ""}</td>
           <td class="hide-sm">${esc(t.account_name)}</td>
-          <td>${t.transfer_id ? `<span class="pill">Transfer</span>` : `<select class="cat" aria-label="Category">${categoryOptions(t.category_id)}</select>`}</td>
+          <td>${t.transfer_id ? `<button type="button" class="pill unlink" title="Money moved between your own accounts; not counted as spending or income. Click if this isn't a transfer.">Transfer</button>` : `<select class="cat" aria-label="Category">${categoryOptions(t.category_id)}</select>`}</td>
           ${moneyCell(t.amount_cents)}
           <td class="actions"><button class="link edit">Edit</button><button class="link danger del">Delete</button></td></tr>`).join("")
           : `<tr><td colspan="6" class="empty">No transactions match.</td></tr>`}</tbody></table></div>
@@ -474,6 +474,11 @@ pages.transactions = async (params) => {
     $(".del", tr).onclick = async () => {
       if (await confirmDialog(`Delete "${t.payee || "transaction"}" (${money(t.amount_cents)})?`))
         await attempt(() => api("DELETE", `/api/transactions/${t.id}`), "Deleted").then(route);
+    };
+    const unlink = $(".unlink", tr);
+    if (unlink) unlink.onclick = async () => {
+      if (await confirmDialog("Not a transfer? Both sides will become ordinary transactions you can categorize."))
+        await attempt(() => api("POST", `/api/transactions/${t.id}/unlink-transfer`), "Split into two transactions").then(route);
     };
     const sel = $(".cat", tr);
     if (sel) sel.onchange = () => attempt(() => api("PUT", `/api/transactions/${t.id}`, { category_id: sel.value || null }), "Category updated");
@@ -569,25 +574,34 @@ async function syncBanks({ quiet = false } = {}) {
   syncing = (async () => {
     if (!quiet) toast("Syncing with your banks…");
     $$(".sync-banks").forEach((b) => { b.disabled = true; b.textContent = "Syncing…"; });
+    let changed = !quiet;  // a background sync only redraws if something new arrived
     try {
       const results = await api("POST", "/api/connections/sync");
       const imported = results.reduce((s, r) => s + r.imported, 0);
       const matched = results.reduce((s, r) => s + r.matched, 0);
-      const added = results.flatMap((r) => r.added_accounts);
+      const transfers = results.reduce((s, r) => s + (r.transfers_linked || 0), 0);
+      const added = results.flatMap((r) => r.added_accounts || []);
       const errors = results.flatMap((r) => r.errors);
+      changed = changed || imported > 0 || matched > 0 || transfers > 0 || added.length > 0 || errors.length > 0;
       if (!quiet || imported || errors.length)
         toast(`Imported ${imported} new transaction${imported === 1 ? "" : "s"} from your banks` +
           (matched ? `, matched ${matched} you'd already entered` : "") +
+          (transfers ? `, recognised ${transfers} transfer${transfers === 1 ? "" : "s"} between your accounts` : "") +
           (added.length ? `; now syncing ${added.join(", ")}` : "") +
           (errors.length ? `. Problem: ${errors[0]}` : ""), errors.length > 0);
       return results;
     } catch (e) {
+      changed = true;
       toast(e.message, true);
       throw e;
     } finally {
       syncing = null;
-      await loadShared();
-      await route();
+      if (changed) {
+        await loadShared();
+        await route();
+      } else {
+        $$(".sync-banks").forEach((b) => { b.disabled = false; b.textContent = b.id === "tx-sync" ? "Sync banks" : "Sync now"; });
+      }
     }
   })();
   return syncing;
@@ -713,7 +727,7 @@ async function installUpdate() {
   const u = updateInfo;
   if (!u) return;
   if (!(u.can_install && desktop())) {  // browser / source installs: open the download page
-    window.open(u.page, "_blank");
+    openExternal(u.page);
     return;
   }
   $$("#upd-now, #settings-update").forEach((x) => { x.disabled = true; x.textContent = "Downloading…"; });
@@ -722,7 +736,7 @@ async function installUpdate() {
   toast(r.message, !r.ok);
   if (!r.ok) {
     $$("#upd-now, #settings-update").forEach((x) => { x.disabled = false; x.textContent = "Try again"; });
-    if (r.page) window.open(r.page, "_blank");
+    if (r.page) openExternal(r.page);
   }
 }
 
@@ -1291,6 +1305,13 @@ function initTheme() {
 // The pywebview desktop shell exposes native helpers here; absent in a normal browser.
 const desktop = () => (window.pywebview && window.pywebview.api) || null;
 
+// App windows ignore window.open for outside sites, so the desktop app hands them
+// to the system browser instead.
+function openExternal(url) {
+  if (desktop() && desktop().open_url) desktop().open_url(url);
+  else window.open(url, "_blank");
+}
+
 function initToolbar() {
   const sel = $("#profile-select");
   sel.onchange = async () => {
@@ -1318,6 +1339,12 @@ function initToolbar() {
 }
 
 window.addEventListener("hashchange", route);
+// Failed actions already show their error in a toast (see attempt()); don't also
+// surface them as uncaught errors.
+window.addEventListener("unhandledrejection", (e) => {
+  console.warn("Handled:", e.reason && e.reason.message ? e.reason.message : e.reason);
+  e.preventDefault();
+});
 initTheme();
 initToolbar();
 // Keep bank data fresh: sync on open and every so often while the app stays open.

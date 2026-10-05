@@ -16,6 +16,13 @@ def _require(value, what):
     return value
 
 
+def _require_name(value, what="name"):
+    value = (value or "").strip() if isinstance(value, str) or value is None else value
+    if not value:
+        raise ValueError("%s can't be blank" % what)
+    return value
+
+
 def _update(conn, table, item_id, fields, allowed):
     sets = {k: v for k, v in fields.items() if k in allowed}
     if not sets:
@@ -85,6 +92,8 @@ def find_account(conn, ref):
 
 
 def update_account(conn, account_id, **fields):
+    if "name" in fields:
+        fields["name"] = _require_name(fields["name"], "account name")
     if "type" in fields and fields["type"] not in ACCOUNT_TYPES:
         raise ValueError("invalid account type")
     _update(conn, "accounts", account_id, fields,
@@ -122,6 +131,8 @@ def add_category(conn, name, kind="expense", group_name=""):
 
 
 def update_category(conn, category_id, **fields):
+    if "name" in fields:
+        fields["name"] = _require_name(fields["name"], "category name")
     if "kind" in fields and fields["kind"] not in CATEGORY_KINDS:
         raise ValueError("invalid category kind")
     _update(conn, "categories", category_id, fields, {"name", "kind", "group_name"})
@@ -242,6 +253,69 @@ def update_transaction(conn, tx_id, **fields):
             _update(conn, "transactions", tx["transfer_id"], mirror, set(mirror))
 
 
+TRANSFER_MATCH_DAYS = 4
+
+
+def _pair_key(a, b):
+    return "not_transfer:%d-%d" % (min(a, b), max(a, b))
+
+
+def link_transfer(conn, out_id, in_id):
+    """Mark two existing transactions as the two sides of one transfer."""
+    cat = find_category(conn, "Transfer", create_kind="transfer")["id"]
+    conn.execute("UPDATE transactions SET transfer_id = ?, category_id = ? WHERE id = ?", (in_id, cat, out_id))
+    conn.execute("UPDATE transactions SET transfer_id = ?, category_id = ? WHERE id = ?", (out_id, cat, in_id))
+
+
+def unlink_transfer(conn, tx_id):
+    """Split a transfer back into two ordinary transactions (and don't auto-link them again)."""
+    tx = get_transaction(conn, tx_id)
+    if not tx["transfer_id"]:
+        raise ValueError("that transaction isn't a transfer")
+    other = tx["transfer_id"]
+    conn.execute("UPDATE transactions SET transfer_id = NULL, category_id = NULL WHERE id IN (?, ?)",
+                 (tx_id, other))
+    conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, '1')", (_pair_key(tx_id, other),))
+    conn.commit()
+
+
+def detect_transfers(conn):
+    """Link bank-downloaded money moving between your own accounts as transfers.
+
+    A card payment shows up twice when both accounts are linked: money out of checking
+    and money into the card. Left alone, that counts as both spending and income. A pair
+    is linked only when the amounts match exactly, the accounts differ, the dates are at
+    most a few days apart and each side has exactly one possible partner. Pairs the user
+    split apart ("Not a transfer") are never re-linked. Returns the number of pairs linked.
+    """
+    cands = rows(conn.execute(
+        "SELECT id, account_id, date, amount_cents FROM transactions"
+        " WHERE transfer_id IS NULL AND external_id IS NOT NULL AND amount_cents != 0"))
+    rejected = {r[0] for r in conn.execute("SELECT key FROM settings WHERE key LIKE 'not_transfer:%'")}
+    by_amount = {}
+    for t in cands:
+        by_amount.setdefault(t["amount_cents"], []).append(t)
+
+    def partners(t):
+        d = parse_date(t["date"])
+        return [o for o in by_amount.get(-t["amount_cents"], [])
+                if o["account_id"] != t["account_id"]
+                and abs((parse_date(o["date"]) - d).days) <= TRANSFER_MATCH_DAYS
+                and _pair_key(t["id"], o["id"]) not in rejected]
+
+    linked, used = 0, set()
+    for t in cands:
+        if t["amount_cents"] >= 0 or t["id"] in used:
+            continue
+        mine = partners(t)
+        if len(mine) == 1 and mine[0]["id"] not in used and len(partners(mine[0])) == 1:
+            link_transfer(conn, t["id"], mine[0]["id"])
+            used.update((t["id"], mine[0]["id"]))
+            linked += 1
+    conn.commit()
+    return linked
+
+
 def delete_transaction(conn, tx_id):
     tx = get_transaction(conn, tx_id)
     conn.execute("DELETE FROM transactions WHERE id IN (?, ?)", (tx_id, tx["transfer_id"] or -1))
@@ -360,6 +434,8 @@ def contribute_goal(conn, goal_id, amount_cents):
 
 
 def update_goal(conn, goal_id, **fields):
+    if "name" in fields:
+        fields["name"] = _require_name(fields["name"], "goal name")
     if "target_date" in fields:
         fields["target_date"] = (parse_date(fields["target_date"]).isoformat()
                                  if fields["target_date"] else None)
@@ -385,11 +461,12 @@ def add_recurring(conn, name, account_id, amount_cents, frequency, next_date,
     if not (name or "").strip():
         raise ValueError("name is required")
     get_account(conn, account_id)
+    next_date = parse_date(next_date)
     cur = conn.execute(
-        "INSERT INTO recurring (name, account_id, amount_cents, category_id, payee, frequency, next_date)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO recurring (name, account_id, amount_cents, category_id, payee, frequency,"
+        " next_date, anchor_day) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         (name.strip(), account_id, int(amount_cents), category_id, payee or name.strip(), frequency,
-         parse_date(next_date).isoformat()),
+         next_date.isoformat(), next_date.day),
     )
     conn.commit()
     return cur.lastrowid
@@ -406,11 +483,17 @@ def list_recurring(conn, include_inactive=True):
 def update_recurring(conn, rec_id, **fields):
     if "frequency" in fields and fields["frequency"] not in FREQUENCIES:
         raise ValueError("invalid frequency")
+    if "name" in fields:
+        fields["name"] = _require_name(fields["name"], "name")
     if "next_date" in fields:
-        fields["next_date"] = parse_date(fields["next_date"]).isoformat()
+        d = parse_date(fields["next_date"])
+        current = row(conn.execute("SELECT next_date FROM recurring WHERE id = ?", (rec_id,)))
+        fields["next_date"] = d.isoformat()
+        if not current or current["next_date"] != fields["next_date"]:
+            fields["anchor_day"] = d.day  # only a changed date redefines the intended day
     _update(conn, "recurring", rec_id, fields,
             {"name", "account_id", "amount_cents", "category_id", "payee", "frequency",
-             "next_date", "active"})
+             "next_date", "anchor_day", "active"})
 
 
 def delete_recurring(conn, rec_id):
@@ -432,7 +515,7 @@ def upcoming(conn, days=30, as_of=None):
             out.append({"recurring_id": r["id"], "name": r["name"], "date": d.isoformat(),
                         "amount_cents": r["amount_cents"], "account_name": r["account_name"],
                         "category_name": r["category_name"], "overdue": d < start})
-            d = next_occurrence(d, r["frequency"])
+            d = next_occurrence(d, r["frequency"], r["anchor_day"])
     out.sort(key=lambda o: o["date"])
     return out
 
@@ -450,7 +533,7 @@ def post_due(conn, as_of=None):
             created.append(add_transaction(conn, r["account_id"], d, r["amount_cents"],
                                            r["payee"] or r["name"], r["category_id"],
                                            "Recurring: " + r["name"], commit=False))
-            d = next_occurrence(d, r["frequency"])
+            d = next_occurrence(d, r["frequency"], r["anchor_day"])
         conn.execute("UPDATE recurring SET next_date = ? WHERE id = ?", (d.isoformat(), r["id"]))
     conn.commit()
     return created
