@@ -87,6 +87,32 @@ The same desktop app is built for macOS as a disk image, in two versions:
 To build it yourself on a Mac: `pip install pyinstaller pywebview truststore certifi`,
 `python packaging/build_exe.py`, then `packaging/make_dmg.sh dist/FinOrganizer.dmg`.
 
+## iPhone app
+
+FinOrganizer also runs on iPhone (iOS 16.4 or later recommended) as a home-screen web app:
+
+1. On the iPhone, open **https://mmcvey02.github.io/finorganizer/** in Safari.
+2. Tap **Share** → **Add to Home Screen** → **Add**.
+3. Open FinOrganizer from its icon. It runs full screen, works offline, and updates itself
+   when a new version is published.
+
+It's the same program as the desktop app (Python running inside the page via
+[Pyodide](https://pyodide.org)), with these differences:
+
+- **Your data stays on the phone**, in Safari's storage for the app. Nothing is sent online,
+  and it isn't shared with your computer automatically.
+- **No bank connections**: banks' servers don't accept requests from web pages. Import a CSV
+  from your bank's site or app instead (Transactions → Import CSV), or keep banks linked in the
+  desktop app and move a backup over.
+- **Moving data:** ⚙ Settings → *Your data* → **Back up now** saves the current profile as one
+  file (on iPhone through the share sheet, e.g. *Save to Files*). **Restore from a backup** loads
+  such a file on any device, so you can move data from the computer to the phone and back.
+- Back up now and then: deleting the home-screen app or clearing Safari's website data deletes
+  the data stored in it.
+
+To build it yourself: `npm pack pyodide@314.0.7 && tar xzf pyodide-314.0.7.tgz`, then
+`python packaging/build_web.py --pyodide-dir package` and serve `dist/web/` over HTTPS.
+
 ## Profiles, printing and bank connections
 
 **Profiles** keep separate finances for different people (a partner, a parent, a child), each
@@ -213,10 +239,13 @@ finorganizer/
   summary_page.py  one-page printable summary with charts
   desktop.py   desktop app: native window via pywebview; closing it quits
   updater.py   checks GitHub Releases and installs updates in the Windows app
+  backup.py    one-file backups of a profile, and restoring them
+  webapp.py    entry point for the iPhone / web version (runs on Pyodide)
   server.py    local JSON API + static file server (standard library only)
   cli.py       command-line interface
   sample.py    demo data generator
   static/      single-page web UI (HTML/CSS/vanilla JS)
+web/           iPhone / web version: in-page bridge, service worker (built by packaging/build_web.py)
 tests/         unit and API tests: python -m unittest discover -s tests
 ```
 

@@ -8,3 +8,5 @@ dist/
 *.spec
 finorganizer/_build.py
 release-notes.md
+package/
+pyodide-*.tgz

@@ -50,7 +50,16 @@ const monthLabel = (m, long = false) => {
 };
 const titleCase = (s) => s.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 
+// The iPhone / web version (web/finweb.js) has no server: it runs the same Python
+// code inside the page, and requests are handed straight to it.
+const web = () => window.FinWeb || null;
+
 async function api(method, path, body) {
+  if (web()) {
+    const r = await web().request(method, path, body);
+    if (r.status >= 400) throw new Error(r.data.error || `Request failed (${r.status})`);
+    return r.data;
+  }
   const res = await fetch(path, {
     method,
     headers: body ? { "Content-Type": "application/json" } : {},
@@ -144,7 +153,9 @@ function formDialog(title, fields, submitLabel = "Save") {
       dlg.close();
       resolve(out);
     };
-    dlg.onclose = () => resolve(null);
+    // The previous dialog's "close" event can arrive after this one has opened
+    // (e.g. a confirmation right after a form); only a real close cancels.
+    dlg.onclose = () => { if (!dlg.open) resolve(null); };
     dlg.showModal();
     const first = $("input:not([type=checkbox]), select, textarea", form);
     if (first) first.focus();
@@ -305,7 +316,11 @@ pages.dashboard = async (params) => {
       <h1>Welcome to FinOrganizer</h1>
       <p>Start by adding your bank accounts, cards, loans and investments.</p>
       <p><a class="btn" href="#accounts">Add an account</a></p>
-      <p class="small">Want to explore first? Run <code>python -m finorganizer demo</code> to load sample data.</p></div>`;
+      <p class="small">Want to explore first? <button class="link" id="load-sample">Load sample data</button>
+        (you can delete the sample accounts later, or create a separate profile for it).</p></div>`;
+    $("#load-sample").onclick = async () => {
+      if (await attempt(() => api("POST", "/api/sample"), "Sample data loaded")) { await loadShared(); route(); }
+    };
     return;
   }
   view.innerHTML = `
@@ -420,7 +435,7 @@ async function importCSV(defaultAccount) {
 pages.transactions = async (params) => {
   const f = Object.fromEntries(params);
   const qs = new URLSearchParams({ ...f, limit: 500 });
-  const [txs, conns] = await Promise.all([GET(`/api/transactions?${qs}`), GET("/api/connections").catch(() => [])]);
+  const [txs, conns] = await Promise.all([GET(`/api/transactions?${qs}`), bankConnections()]);
   const total = txs.reduce((s, t) => s + t.amount_cents, 0);
   const lastSync = conns.map((c) => c.last_sync).filter(Boolean).sort().pop();
   const syncErrors = conns.filter((c) => c.last_error);
@@ -623,7 +638,17 @@ async function syncBanks({ quiet = false } = {}) {
   return syncing;
 }
 
+// Bank downloads need the desktop app: banks' servers don't accept requests from web pages.
+const bankConnections = () => (web() ? Promise.resolve([]) : GET("/api/connections").catch(() => []));
+
 async function renderBanks(box) {
+  if (web()) {
+    box.innerHTML = `<div class="card"><h2>Linked banks</h2>
+      <p class="muted">Automatic bank downloads are only available in the desktop app. On your phone, download a CSV
+      file from your bank's website or app and use <a href="#transactions">Transactions → Import CSV</a>.
+      Or keep your banks linked in the desktop app and move a backup to your phone (Settings → Your data).</p></div>`;
+    return;
+  }
   const conns = await GET("/api/connections");
   const linkedTo = new Set(conns.flatMap((c) => c.accounts.map((r) => r.account_id)).filter(Boolean));
   const feedOptions = (r) => {
@@ -721,6 +746,7 @@ const pref = (key, fallback) => { try { return localStorage.getItem(key) ?? fall
 const setPref = (key, value) => { try { localStorage.setItem(key, value); } catch (_) { /* ignore */ } };
 
 async function checkForUpdates() {
+  if (web()) return null;  // the web version is always the latest one published
   updateInfo = await GET("/api/update").catch((e) => ({ error: e.message, available: false }));
   renderUpdateBanner();
   return updateInfo;
@@ -770,7 +796,12 @@ pages.settings = async () => {
   await loadProfiles();
   const auto = pref("autoUpdateCheck", "on") === "on";
   view.innerHTML = `<div class="page-head"><h1>Settings</h1></div>
-    <div class="card" id="updates-card"><h2>Updates</h2>
+    ${web() ? `<div class="card"><h2>About this version</h2>
+      <p>FinOrganizer ${esc(store.meta.version)} is running entirely on this device. Your data is stored here, not online,
+      and isn't shared with your other devices.</p>
+      <p class="muted small">It updates itself: new versions load the next time you open it.
+      ${web().standalone ? "" : "<br><strong>Tip:</strong> on iPhone, tap Share → <em>Add to Home Screen</em> to use FinOrganizer like an app, offline too."}</p>
+    </div>` : `<div class="card" id="updates-card"><h2>Updates</h2>
       <dl class="kv" style="max-width:420px"><dt>Installed version</dt><dd>${esc(store.meta.version)}</dd>
         <dt>Latest version</dt><dd id="latest-version">${updateInfo && updateInfo.latest ? esc(updateInfo.latest) : "–"}</dd></dl>
       <div id="update-status" class="muted" style="margin:10px 0"></div>
@@ -781,9 +812,21 @@ pages.settings = async () => {
       </div>
       <div id="update-notes"></div>
       <p class="muted small">Updates replace only the program. Your data, profiles and bank connections are kept.</p>
+    </div>`}
+    <div style="height:16px"></div>
+    <div class="card"><h2>Your data</h2>
+      <p class="muted">A backup is a single file with everything in the current profile${profileState.profiles.length > 1 ? ` (<strong>${esc(currentProfileName())}</strong>)` : ""}.
+        Restore it here or in FinOrganizer on another device to move your data${web() ? ", for example from your computer to this phone" : ", for example to the iPhone version"}.</p>
+      <div class="filters">
+        <a class="btn" id="backup-btn" href="/api/backup.db" download>Back up now</a>
+        <button class="ghost" id="restore-btn">Restore from a backup…</button>
+      </div>
+      ${web() ? '<p class="muted small">Back up now and then: if this app is removed from your Home Screen, or the browser\'s website data is cleared, the data stored here goes with it.</p>' : ""}
     </div>
     <div style="height:16px"></div>
     <div id="profiles-section"></div>`;
+  $("#restore-btn").onclick = restoreBackup;
+  if (web()) { await renderProfiles($("#profiles-section")); return; }
   const show = (u) => {
     $("#latest-version").textContent = u.latest || "–";
     const btn = $("#settings-update");
@@ -806,6 +849,26 @@ pages.settings = async () => {
 };
 
 pages.profiles = pages.settings;
+
+const currentProfileName = () => (profileState.profiles.find((p) => p.id === profileState.current) || {}).name || "Default";
+
+async function restoreBackup() {
+  const v = await formDialog("Restore from a backup", [
+    { name: "file", label: "Backup file", type: "file", accept: ".db,application/vnd.sqlite3,application/x-sqlite3,application/octet-stream", wide: true,
+      hint: `Replaces everything in the current profile (${currentProfileName()}) with the backup. Other profiles aren't touched.` },
+  ], "Restore");
+  if (!v || !v.file) return;
+  if (!(await confirmDialog(`Replace all data in ${currentProfileName()} with ${v.file.name}?`))) return;
+  const bytes = new Uint8Array(await v.file.arrayBuffer());
+  let bin = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  const r = await attempt(() => api("POST", "/api/restore", { data: btoa(bin) }));
+  if (!r) return;
+  toast(`Restored ${r.accounts} account${r.accounts === 1 ? "" : "s"} and ${r.transactions} transaction${r.transactions === 1 ? "" : "s"}`);
+  await Promise.all([loadShared(), loadProfiles()]);
+  location.hash = "dashboard";
+  route();
+}
 
 async function renderProfiles(box) {
   box.innerHTML = `<div class="card"><div class="filters"><h2 style="margin:0 auto 0 0">Profiles</h2><button id="add">+ New profile</button></div>
@@ -1352,15 +1415,20 @@ function initToolbar() {
     const month = new URLSearchParams(location.hash.split("?")[1] || "").get("month") || thisMonth();
     // In the desktop app the summary opens in its own native window.
     if (desktop()) desktop().open_summary(month);
+    else if (web()) web().openSummary(`/summary?month=${encodeURIComponent(month)}`);
     else window.open(`/summary?print=1&month=${encodeURIComponent(month)}`, "_blank");
   };
-  // Desktop app: save exports through a native "Save as" dialog instead of a download.
+  // Desktop app: save exports and backups through a native "Save as" dialog instead of
+  // a download. Web version: the file is made in the page and handed to the browser.
   document.addEventListener("click", async (e) => {
-    const a = e.target.closest("a[href^='/api/export.csv']");
-    if (!a || !desktop()) return;
+    const a = e.target.closest("a[href^='/api/export.csv'], a[href='/api/backup.db']");
+    if (!a || !(desktop() || web())) return;
     e.preventDefault();
-    const q = new URLSearchParams(a.getAttribute("href").split("?")[1] || "");
-    const saved = await desktop().export_csv(q.get("start") || "", q.get("end") || "");
+    const href = a.getAttribute("href");
+    if (web()) { await attempt(() => web().download(href)); return; }
+    const q = new URLSearchParams(href.split("?")[1] || "");
+    const saved = await attempt(() => href === "/api/backup.db" ? desktop().save_backup()
+      : desktop().export_csv(q.get("start") || "", q.get("end") || ""));
     if (saved) toast(`Saved ${saved}`);
   });
 }
@@ -1382,7 +1450,7 @@ initToolbar();
 // Keep bank data fresh: sync on open and every so often while the app stays open.
 const AUTO_SYNC_HOURS = 6;
 async function autoSync() {
-  const conns = await GET("/api/connections").catch(() => []);
+  const conns = await bankConnections();
   const stale = conns.some((c) => !c.last_sync ||
     Date.now() - new Date(c.last_sync).getTime() > AUTO_SYNC_HOURS * 3600e3);
   if (conns.length && stale) await syncBanks({ quiet: true }).catch(() => {});
@@ -1404,5 +1472,5 @@ Promise.all([loadShared(), loadProfiles()]).then(route).then(() => {
   autoSync();
   if (pref("autoUpdateCheck", "on") === "on") checkForUpdates();
 }).catch((e) => {
-  view.innerHTML = `<div class="card empty">Could not reach the FinOrganizer server: ${esc(e.message)}</div>`;
+  view.innerHTML = `<div class="card empty">${web() ? "FinOrganizer couldn't start" : "Could not reach the FinOrganizer server"}: ${esc(e.message)}</div>`;
 });

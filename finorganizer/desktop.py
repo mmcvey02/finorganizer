@@ -100,6 +100,22 @@ class Api:
             f.write(text)
         return path
 
+    def save_backup(self):
+        """Ask where to save, then write a backup of the current profile there."""
+        import webview
+        from . import backup, server
+        result = self._main.create_file_dialog(
+            webview.FileDialog.SAVE, save_filename=server.backup_filename(self._app),
+            file_types=("FinOrganizer backups (*.db)", "All files (*.*)"))
+        if not result:
+            return None
+        path = result if isinstance(result, str) else result[0]
+        with self._app.lock:
+            data = backup.snapshot(self._app.conn)
+        with open(path, "wb") as f:
+            f.write(data)
+        return path
+
 
 def run(db_path=None, smoke_test=False):
     """Start the desktop app; returns the process exit code."""

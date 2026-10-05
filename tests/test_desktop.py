@@ -91,6 +91,9 @@ class DesktopTests(unittest.TestCase):
             # User exports transactions through the native Save dialog.
             main.save_path = os.path.join(self.dir, "out.csv")
             seen["saved"] = api.export_csv()
+            # ...and saves a backup the same way.
+            main.save_path = os.path.join(self.dir, "backup.db")
+            seen["backup"] = api.save_backup()
             # User closes the main window: the summary window must close too.
             main.destroy()
             seen["summary_closed"] = summary.destroyed and not fake.windows
@@ -104,6 +107,8 @@ class DesktopTests(unittest.TestCase):
         self.assertTrue(seen["summary_closed"])
         with open(seen["saved"], encoding="utf-8") as f:
             self.assertTrue(f.read().startswith("id,date,account_name"))
+        with open(seen["backup"], "rb") as f:
+            self.assertTrue(f.read().startswith(b"SQLite format 3"))
         # After the window is gone, the server no longer answers.
         with self.assertRaises((urllib.error.URLError, ConnectionError, OSError)):
             urllib.request.urlopen(seen["url"] + "/api/meta", timeout=2)
@@ -115,6 +120,7 @@ class DesktopTests(unittest.TestCase):
         def session(fake):
             main = fake.windows[0]
             self.assertIsNone(main.kw["js_api"].export_csv())
+            self.assertIsNone(main.kw["js_api"].save_backup())
             main.destroy()
 
         sys.modules["webview"] = make_fake_webview(session)

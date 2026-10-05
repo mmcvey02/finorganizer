@@ -175,6 +175,52 @@ jobs:
           name: FinOrganizer-mac-${{ matrix.label }}
           path: dist/FinOrganizer-mac-${{ matrix.label }}.dmg
 
+  # The iPhone / web version: a static site running the same Python code in the browser.
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Stamp version
+        run: |
+          base=$(python -c "import finorganizer as f; print('.'.join(f.__version__.split('.')[:2]))")
+          echo "VERSION = \"$base.$GITHUB_RUN_NUMBER\"" > finorganizer/_build.py
+
+      - name: Get Pyodide
+        run: |
+          version=$(python -c "import sys; sys.path.insert(0, 'packaging'); import build_web; print(build_web.PYODIDE_VERSION)")
+          npm pack "pyodide@$version"
+          tar xzf "pyodide-$version.tgz"
+
+      - name: Build the web app
+        run: python packaging/build_web.py --pyodide-dir package --out dist/web
+
+      - name: Smoke-test it on Pyodide
+        run: node packaging/test_web.mjs dist/web
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist/web
+
+  # Publish the web app on GitHub Pages (https://<owner>.github.io/<repo>/).
+  pages:
+    needs: web
+    if: github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v4
+
   # Every build of the default branch becomes a release (only if all builds passed);
   # the app's update checker looks at the latest one.
   release:

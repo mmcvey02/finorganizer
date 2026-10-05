@@ -3,6 +3,7 @@
 Uses only the standard library. Money in the API is always integer cents.
 """
 
+import base64
 import json
 import mimetypes
 import os
@@ -12,7 +13,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from . import banksync, categorize, csvio, db, ledger, planning, reports, summary_page, updater
+from . import backup, banksync, categorize, csvio, db, ledger, planning, reports, sample, summary_page, updater
 from .db import ACCOUNT_TYPES, CATEGORY_KINDS, FREQUENCIES
 from .profiles import DEFAULT_ID
 from .money import month_bounds, month_of, today
@@ -74,6 +75,13 @@ def build_router(app=None):
         "account_types": ACCOUNT_TYPES, "category_kinds": CATEGORY_KINDS,
         "frequencies": FREQUENCIES, "today": today().isoformat(),
         "version": updater.current_version(), "can_self_update": updater.can_self_update()})
+    def load_sample(c, q, b):
+        if L.list_accounts(c, True):
+            raise ValueError("sample data can only be added to an empty profile")
+        sample.load_sample_data(c)
+        categorize.categorize_uncategorized(c)
+
+    r.add("POST", "/api/sample", load_sample)
     r.add("GET", "/api/dashboard", lambda c, q, b: reports.dashboard(c, q.get("month")))
 
     # accounts
@@ -272,6 +280,22 @@ class App:
         return db.get_setting(self.conn, "profile_name") or (
             "" if self.profile_id == DEFAULT_ID else self.profile_id)
 
+    def restore(self, data):
+        """Replace the current profile's data with a backup (see backup.restore)."""
+        with self.lock:
+            path = backup.db_path(self.conn)
+            try:
+                self.conn = backup.restore(self.conn, data)
+            except Exception:
+                if path:  # restore may have closed the connection; reopen what's there
+                    try:
+                        self.conn.execute("SELECT 1")
+                    except sqlite3.ProgrammingError:
+                        self.conn = db.connect(path)
+                raise
+            categorize.backfill_once(self.conn)
+            return backup.summary(self.conn)
+
     def switch(self, profile_id):
         """Point the app at another profile's database (caller holds the lock)."""
         new_conn = self.profiles.open(profile_id)
@@ -303,6 +327,62 @@ class App:
                 raise HTTPError(400, str(e))
 
 
+def respond(app, method, path, query_string="", raw_body=b""):
+    """Answer one API request: returns (status, content_type, body_bytes, headers).
+
+    Shared by the local web server and the iPhone web app, which calls it directly.
+    """
+    query = {k: v[-1] for k, v in parse_qs(query_string or "").items()}
+    json_type = "application/json; charset=utf-8"
+    try:
+        if path == "/api/export.csv" and method == "GET":
+            with app.lock:
+                text = csvio.export_csv(app.conn, start=query.get("start") or None,
+                                        end=query.get("end") or None)
+            return (200, "text/csv; charset=utf-8", text.encode(),
+                    {"Content-Disposition": 'attachment; filename="transactions.csv"'})
+        if path == "/api/backup.db" and method == "GET":
+            with app.lock:
+                data = backup.snapshot(app.conn)
+            return (200, "application/vnd.sqlite3", data,
+                    {"Content-Disposition": 'attachment; filename="%s"' % backup_filename(app)})
+        if path == "/api/update" and method == "GET":
+            # Network call to GitHub: done outside the database lock.
+            return 200, json_type, json.dumps(updater.check()).encode(), {}
+        if path == "/summary" and method == "GET":
+            with app.lock:
+                page = summary_page.render(app.conn, query.get("month") or None,
+                                           app.profile_name, query.get("print") == "1")
+            return 200, "text/html; charset=utf-8", page.encode(), {}
+        body = {}
+        if raw_body:
+            try:
+                body = json.loads(raw_body)
+            except ValueError:
+                raise HTTPError(400, "invalid JSON body")
+            if not isinstance(body, dict):
+                raise HTTPError(400, "JSON body must be an object")
+        if path == "/api/restore" and method == "POST":
+            try:
+                data = base64.b64decode(body.get("data") or "", validate=True)
+            except (ValueError, TypeError):
+                raise HTTPError(400, "that file isn't a FinOrganizer backup")
+            try:
+                result = app.restore(data)
+            except ValueError as e:
+                raise HTTPError(400, str(e))
+        else:
+            result = app.handle(method, path, query, body)
+        return 200, json_type, json.dumps({"ok": True} if result is None else result).encode(), {}
+    except HTTPError as e:
+        return e.status, json_type, json.dumps({"error": str(e)}).encode(), {}
+
+
+def backup_filename(app):
+    name = re.sub(r"[^A-Za-z0-9-]+", "-", app.profile_name or "").strip("-")
+    return "FinOrganizer-%sbackup-%s.db" % (name + "-" if name else "", today().isoformat())
+
+
 def make_handler(app):
     class Handler(BaseHTTPRequestHandler):
         server_version = "FinOrganizer"
@@ -324,39 +404,17 @@ def make_handler(app):
 
         def _dispatch(self, method):
             url = urlparse(self.path)
-            query = {k: v[-1] for k, v in parse_qs(url.query).items()}
-            try:
-                if url.path == "/api/export.csv" and method == "GET":
-                    with app.lock:
-                        text = csvio.export_csv(app.conn, start=query.get("start") or None,
-                                                end=query.get("end") or None)
-                    return self._send(200, text.encode(), "text/csv; charset=utf-8",
-                                      {"Content-Disposition": 'attachment; filename="transactions.csv"'})
-                if url.path == "/api/update" and method == "GET":
-                    # Network call to GitHub: done outside the database lock.
-                    return self._send(200, updater.check())
-                if url.path == "/summary" and method == "GET":
-                    with app.lock:
-                        page = summary_page.render(app.conn, query.get("month") or None,
-                                                   app.profile_name, query.get("print") == "1")
-                    return self._send(200, page.encode(), "text/html; charset=utf-8")
-                if not url.path.startswith("/api/"):
-                    if method != "GET":
-                        raise HTTPError(405, "method not allowed")
+            if not url.path.startswith("/api/") and url.path != "/summary":
+                if method != "GET":
+                    return self._send(405, {"error": "method not allowed"})
+                try:
                     return self._static(url.path)
-                body = {}
-                length = int(self.headers.get("Content-Length") or 0)
-                if length:
-                    try:
-                        body = json.loads(self.rfile.read(length))
-                    except ValueError:
-                        raise HTTPError(400, "invalid JSON body")
-                    if not isinstance(body, dict):
-                        raise HTTPError(400, "JSON body must be an object")
-                result = app.handle(method, url.path, query, body)
-                self._send(200, {"ok": True} if result is None else result)
-            except HTTPError as e:
-                self._send(e.status, {"error": str(e)})
+                except HTTPError as e:
+                    return self._send(e.status, {"error": str(e)})
+            length = int(self.headers.get("Content-Length") or 0)
+            raw = self.rfile.read(length) if length else b""
+            status, ctype, data, headers = respond(app, method, url.path, url.query, raw)
+            self._send(status, data, ctype, headers)
 
         def _static(self, path):
             rel = "index.html" if path in ("", "/") else path.lstrip("/")
