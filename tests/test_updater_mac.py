@@ -89,9 +89,10 @@ class MacUpdateTests(unittest.TestCase):
         self.assertEqual(read_marker(self.bundle), "v1")
 
     def test_bundle_path(self):
-        exe = "/Applications/FinOrganizer.app/Contents/MacOS/FinOrganizer"
-        self.assertEqual(updater.bundle_path(exe), "/Applications/FinOrganizer.app")
-        self.assertIsNone(updater.bundle_path("/usr/local/bin/python3"))
+        # Built with this OS's own path conventions so the test passes everywhere.
+        exe = os.path.join(self.bundle, "Contents", "MacOS", "FinOrganizer")
+        self.assertEqual(updater.bundle_path(exe), self.bundle)
+        self.assertIsNone(updater.bundle_path(os.path.join(self.dir, "bin", "python3")))
 
     def test_locations_that_cannot_be_updated(self):
         with self.assertRaisesRegex(updater.UpdateError, "temporary copy"):

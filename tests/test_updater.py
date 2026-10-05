@@ -76,14 +76,15 @@ class UpdaterTests(unittest.TestCase):
         files = {"FinOrganizer.exe": b"new desktop", "FinOrganizer-cli.exe": b"new cli"}
         with self.serve(fake_release(files=files), files):
             info = updater.check()
-            self.assertEqual(updater.install(info, exe), exe)
+            self.assertEqual(updater._install_windows(info, exe), exe)
         with open(exe, "rb") as f:
             self.assertEqual(f.read(), b"new desktop")
         with open(cli, "rb") as f:
             self.assertEqual(f.read(), b"new cli")
         with open(exe + ".old", "rb") as f:
             self.assertEqual(f.read(), b"old")  # the running program was moved aside, not overwritten
-        updater.cleanup_old(exe)
+        with mock.patch.object(updater.sys, "platform", "win32"):  # Windows leftovers
+            updater.cleanup_old(exe)
         self.assertFalse(os.path.exists(exe + ".old"))
 
     def test_corrupted_download_changes_nothing(self):
@@ -93,7 +94,7 @@ class UpdaterTests(unittest.TestCase):
         release = fake_release(files={"FinOrganizer.exe": b"the real bytes"})
         with self.serve(release, {"FinOrganizer.exe": b"tampered bytes"}):
             with self.assertRaisesRegex(updater.UpdateError, "corrupted"):
-                updater.install(updater.check(), exe)
+                updater._install_windows(updater.check(), exe)
         with open(exe, "rb") as f:
             self.assertEqual(f.read(), b"old")
         self.assertEqual(sorted(os.listdir(self.dir)), ["FinOrganizer.exe"])
