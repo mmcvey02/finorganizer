@@ -78,9 +78,11 @@ The same desktop app is built for macOS as a disk image, in two versions:
   FinOrganizer message. After that it opens normally.
 - **Closing the window** (or Cmd+Q) quits FinOrganizer completely.
 - **Your data** lives in `~/Library/Application Support/FinOrganizer/`. Copy that folder to back it up.
-- **Updates:** the app tells you when a new version is out; download the new `.dmg` and drag it
-  into Applications again, replacing the old copy. Your data is kept. (Installing updates
-  automatically is Windows-only for now.)
+- **Updates:** when a new version is out, click **Update now** (banner or ⚙ Settings). The app
+  downloads the right `.dmg`, verifies its checksum and code signature, replaces itself in
+  Applications and restarts; no "Open Anyway" needed again. Your data is kept. This requires
+  FinOrganizer to be in a folder you can write to (Applications is fine) and opened from there,
+  not straight from the disk image.
 
 To build it yourself on a Mac: `pip install pyinstaller pywebview truststore certifi`,
 `python packaging/build_exe.py`, then `packaging/make_dmg.sh dist/FinOrganizer.dmg`.

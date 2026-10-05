@@ -75,7 +75,7 @@ class Api:
         if not info["available"]:
             return {"ok": False, "message": "You already have the latest version (%s)." % info["current"]}
         if not info["can_install"]:
-            return {"ok": False, "message": "Automatic install only works in the Windows app.",
+            return {"ok": False, "message": "Automatic install only works in the packaged desktop app.",
                     "page": info["page"]}
         try:
             self._relaunch = updater.install(info)
@@ -110,7 +110,7 @@ def run(db_path=None, smoke_test=False):
         def _cleanup():
             for _ in range(10):
                 updater.cleanup_old()
-                if not os.path.exists(sys.executable + ".old"):
+                if not any(os.path.exists(p) for p in updater.leftovers()):
                     return
                 time.sleep(3)
         threading.Thread(target=_cleanup, daemon=True).start()

@@ -1,18 +1,19 @@
 """In-app updates from GitHub Releases.
 
-Each Windows build is published as a GitHub Release (tag ``v<major>.<minor>.<build>``)
-with FinOrganizer.exe and FinOrganizer-cli.exe attached. The app compares its own
-version with the latest release and, in the packaged Windows desktop app, can
-replace itself:
+Each build is published as a GitHub Release (tag ``v<major>.<minor>.<build>``) with
+FinOrganizer.exe, FinOrganizer-cli.exe and the two macOS .dmg files attached. The app
+compares its own version with the latest release and the packaged desktop app can
+replace itself. Every download is checked against the size and SHA-256 GitHub reports.
 
-  1. download the new .exe next to the running one (``FinOrganizer.exe.new``),
-     checking its size and SHA-256 against what GitHub reports;
-  2. rename the running .exe to ``FinOrganizer.exe.old`` (Windows allows renaming a
-     running program, just not overwriting it) and move the new one into place;
-  3. start the new version and close this one. The ``.old`` file is deleted on the
-     next start.
+Windows: download ``FinOrganizer.exe.new`` next to the running program, rename the
+running .exe to ``.old`` (Windows allows renaming a running program, just not
+overwriting it), move the new one into place, restart.
 
-Your data lives elsewhere (``%APPDATA%\\FinOrganizer``), so updates never touch it.
+macOS: download the right .dmg (Apple Silicon or Intel), mount it, copy the app next
+to the installed one, verify its code signature, swap the two app folders, restart.
+
+Leftovers (``.old``) are removed on the next start. Your data lives elsewhere, so
+updates never touch it.
 """
 
 import hashlib
@@ -59,8 +60,11 @@ def is_newer(latest, current):
 
 
 def can_self_update():
-    """Only the packaged Windows desktop app replaces itself; elsewhere we link to the download."""
-    return bool(getattr(sys, "frozen", False)) and os.name == "nt"
+    """The packaged desktop apps (Windows .exe, macOS .app) replace themselves; when running
+    from source we link to the download instead."""
+    if not getattr(sys, "frozen", False):
+        return False
+    return os.name == "nt" or (sys.platform == "darwin" and bundle_path() is not None)
 
 
 def _request(url, accept="application/vnd.github+json"):
@@ -126,10 +130,29 @@ def _download(asset, dest):
 
 
 def install(info, exe_path=None):
-    """Download and swap in the new version. Returns the path of the program to start.
+    """Download and swap in the new version. Returns the path of the program to start."""
+    if sys.platform == "darwin":
+        return _install_mac(info, exe_path)
+    return _install_windows(info, exe_path)
 
-    Also updates FinOrganizer-cli.exe if it sits in the same folder.
-    """
+
+# ------------------------------------------------------------------- Windows
+
+def _swap_file(new_path, exe_path):
+    """Replace a (possibly running) program file, restoring it if anything fails."""
+    old_path = exe_path + ".old"
+    if os.path.exists(old_path):
+        os.remove(old_path)
+    os.rename(exe_path, old_path)      # allowed while running on Windows
+    try:
+        os.replace(new_path, exe_path)
+    except OSError:
+        os.rename(old_path, exe_path)  # put the working version back
+        raise
+
+
+def _install_windows(info, exe_path=None):
+    """Also updates FinOrganizer-cli.exe if it sits in the same folder."""
     exe_path = os.path.abspath(exe_path or sys.executable)
     folder = os.path.dirname(exe_path)
     assets = info.get("assets") or {}
@@ -143,15 +166,7 @@ def install(info, exe_path=None):
 
     new_path = exe_path + ".new"
     _download(assets[main_name], new_path)
-    old_path = exe_path + ".old"
-    if os.path.exists(old_path):
-        os.remove(old_path)
-    os.rename(exe_path, old_path)      # allowed while running on Windows
-    try:
-        os.replace(new_path, exe_path)
-    except OSError:
-        os.rename(old_path, exe_path)  # put the working version back
-        raise
+    _swap_file(new_path, exe_path)
 
     cli = os.path.join(folder, "FinOrganizer-cli.exe")
     if "FinOrganizer-cli.exe" in assets and os.path.exists(cli) and os.path.abspath(cli) != exe_path:
@@ -163,20 +178,142 @@ def install(info, exe_path=None):
     return exe_path
 
 
-def relaunch(exe_path):
+# --------------------------------------------------------------------- macOS
+
+def bundle_path(exe_path=None):
+    """The FinOrganizer.app folder containing the running program, or None."""
+    exe_path = os.path.abspath(exe_path or sys.executable)
+    parts = exe_path.split(os.sep)
+    for i in range(len(parts) - 1, 0, -1):
+        if parts[i].endswith(".app"):
+            return os.sep.join(parts[:i + 1])
+    return None
+
+
+def _is_apple_silicon():
+    """True on M-series Macs, even when an Intel build runs under Rosetta."""
+    try:
+        out = subprocess.run(["sysctl", "-n", "hw.optional.arm64"], capture_output=True, text=True)
+        return out.stdout.strip() == "1"
+    except OSError:
+        import platform
+        return platform.machine() == "arm64"
+
+
+def mac_asset_name():
+    return "FinOrganizer-mac-%s.dmg" % ("apple-silicon" if _is_apple_silicon() else "intel")
+
+
+def _run(cmd):
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise UpdateError("%s failed: %s" % (cmd[0], (result.stderr or result.stdout).strip()[:200]))
+    return result.stdout
+
+
+def _check_mac_location(bundle):
+    if not bundle:
+        raise UpdateError("FinOrganizer isn't running as an app bundle")
+    if "/AppTranslocation/" in bundle:
+        raise UpdateError("macOS is running FinOrganizer from a temporary copy. Drag FinOrganizer "
+                          "into your Applications folder, open it from there, and update again")
+    if bundle.startswith("/Volumes/"):
+        raise UpdateError("FinOrganizer is running from the disk image. Drag it into your "
+                          "Applications folder first, then open it from there")
+    if not os.access(os.path.dirname(bundle), os.W_OK):
+        raise UpdateError("FinOrganizer can't write to %s; download the update manually"
+                          % os.path.dirname(bundle))
+
+
+def _install_mac_from_dmg(dmg, bundle):
+    """Replace the app at ``bundle`` with the FinOrganizer.app inside ``dmg``."""
+    import shutil
+    import tempfile
+    parent = os.path.dirname(bundle)
+    name = os.path.basename(bundle)
+    staged = os.path.join(parent, "." + name + ".new")
+    old = os.path.join(parent, "." + name + ".old")
+    mount = tempfile.mkdtemp(prefix="finorganizer-update-")
+    _run(["hdiutil", "attach", "-nobrowse", "-readonly", "-noautoopen", "-mountpoint", mount, dmg])
+    try:
+        source = os.path.join(mount, "FinOrganizer.app")
+        if not os.path.isdir(source):
+            raise UpdateError("the downloaded disk image doesn't contain FinOrganizer.app")
+        shutil.rmtree(staged, ignore_errors=True)
+        _run(["ditto", source, staged])   # preserves code signatures and permissions
+    finally:
+        subprocess.run(["hdiutil", "detach", "-force", mount], capture_output=True)
+        shutil.rmtree(mount, ignore_errors=True)
+    try:
+        _run(["codesign", "--verify", "--deep", "--strict", staged])
+        # Downloaded by the app itself (and checksum-verified), so it needs no
+        # Gatekeeper "Open Anyway"; make sure no quarantine flag slipped in.
+        subprocess.run(["xattr", "-dr", "com.apple.quarantine", staged], capture_output=True)
+    except UpdateError:
+        shutil.rmtree(staged, ignore_errors=True)
+        raise
+    shutil.rmtree(old, ignore_errors=True)
+    os.rename(bundle, old)            # the running app keeps working from its open files
+    try:
+        os.rename(staged, bundle)
+    except OSError:
+        os.rename(old, bundle)        # put the working version back
+        raise
+
+
+def _install_mac(info, exe_path=None):
+    import tempfile
+    bundle = bundle_path(exe_path)
+    _check_mac_location(bundle)
+    name = mac_asset_name()
+    asset = (info.get("assets") or {}).get(name)
+    if not asset:
+        raise UpdateError("the latest release has no %s attached" % name)
+    folder = tempfile.mkdtemp(prefix="finorganizer-dl-")
+    dmg = os.path.join(folder, name)
+    try:
+        _download(asset, dmg)
+        _install_mac_from_dmg(dmg, bundle)
+    finally:
+        import shutil
+        shutil.rmtree(folder, ignore_errors=True)
+    return bundle
+
+
+# ---------------------------------------------------------------- after update
+
+def relaunch(path):
     """Start the (new) program detached from this process."""
+    if sys.platform == "darwin" and path.endswith(".app"):
+        # -n: start a fresh instance even though this (old) one hasn't quite exited yet.
+        subprocess.Popen(["open", "-n", path], close_fds=True)
+        return
     flags = 0
     if os.name == "nt":
         flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
-    subprocess.Popen([exe_path], close_fds=True, creationflags=flags, cwd=os.path.dirname(exe_path))
+    subprocess.Popen([path], close_fds=True, creationflags=flags, cwd=os.path.dirname(path))
+
+
+def leftovers(exe_path=None):
+    """Files or folders a previous update may have left behind."""
+    exe_path = os.path.abspath(exe_path or sys.executable)
+    if sys.platform == "darwin":
+        bundle = bundle_path(exe_path)
+        if not bundle:
+            return []
+        parent, name = os.path.dirname(bundle), os.path.basename(bundle)
+        return [os.path.join(parent, "." + name + ".old"), os.path.join(parent, "." + name + ".new")]
+    return [exe_path + ".old", exe_path + ".new", exe_path + ".new.part"]
 
 
 def cleanup_old(exe_path=None):
     """Remove the previous version left behind by an update."""
-    exe_path = os.path.abspath(exe_path or sys.executable)
-    for leftover in (exe_path + ".old", exe_path + ".new", exe_path + ".new.part"):
+    import shutil
+    for leftover in leftovers(exe_path):
         try:
-            if os.path.exists(leftover):
+            if os.path.isdir(leftover):
+                shutil.rmtree(leftover)
+            elif os.path.exists(leftover):
                 os.remove(leftover)
         except OSError:
             pass

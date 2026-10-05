@@ -64,6 +64,29 @@ jobs:
           if (Get-Process -Name FinOrganizer -ErrorAction SilentlyContinue) { Write-Error "process still running after window closed"; exit 1 }
           try { Invoke-WebRequest http://127.0.0.1:8765/ -UseBasicParsing -TimeoutSec 3; Write-Error "server still running"; exit 1 } catch { Write-Host "server stopped" }
 
+      - name: Test self-update (replace the program while it is running)
+        shell: pwsh
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP "upd"
+          New-Item -ItemType Directory $dir | Out-Null
+          Copy-Item dist\FinOrganizer.exe "$dir\FinOrganizer.exe"
+          $db = Join-Path $env:RUNNER_TEMP "upd.db"
+          $p = Start-Process "$dir\FinOrganizer.exe" -ArgumentList "--db", $db, "--smoke-test" -PassThru
+          Start-Sleep -Seconds 3
+          # As in a real update: the new version is downloaded while the app is running.
+          Copy-Item dist\FinOrganizer.exe "$dir\FinOrganizer.exe.new"
+          python -c "from finorganizer import updater; updater._swap_file(r'$dir\FinOrganizer.exe.new', r'$dir\FinOrganizer.exe')"
+          if ($LASTEXITCODE -ne 0) { Write-Error "swap failed while running"; exit 1 }
+          if (-not $p.WaitForExit(120000)) { Stop-Process -Id $p.Id -Force; exit 1 }
+          if (-not (Test-Path "$dir\FinOrganizer.exe.old")) { Write-Error "old copy missing"; exit 1 }
+          # The swapped-in program must start, work, and remove the leftover .old file.
+          $q = Start-Process "$dir\FinOrganizer.exe" -ArgumentList "--db", $db, "--smoke-test" -PassThru
+          if (-not $q.WaitForExit(120000)) { Stop-Process -Id $q.Id -Force; exit 1 }
+          if ($q.ExitCode -ne 0) { Write-Error "updated program failed"; exit 1 }
+          Start-Sleep -Seconds 2
+          if (Test-Path "$dir\FinOrganizer.exe.old") { Write-Error "leftover .old not cleaned up"; exit 1 }
+          Write-Host "self-update swap OK"
+
       - uses: actions/upload-artifact@v4
         with:
           name: FinOrganizer-windows
@@ -121,6 +144,25 @@ jobs:
         run: |
           chmod +x packaging/make_dmg.sh
           packaging/make_dmg.sh "dist/FinOrganizer-mac-${{ matrix.label }}.dmg"
+
+      - name: Test self-update with the real macOS tools
+        run: |
+          apps="$RUNNER_TEMP/Applications"; mkdir -p "$apps"
+          ditto dist/FinOrganizer.app "$apps/FinOrganizer.app"
+          touch "$apps/FinOrganizer.app/Contents/old-version-marker"
+          python -c "from finorganizer import updater; updater._install_mac_from_dmg('dist/FinOrganizer-mac-${{ matrix.label }}.dmg', '$apps/FinOrganizer.app')"
+          test ! -e "$apps/FinOrganizer.app/Contents/old-version-marker" || { echo "::error::app was not replaced"; exit 1; }
+          test -e "$apps/.FinOrganizer.app.old/Contents/old-version-marker" || { echo "::error::old copy missing"; exit 1; }
+          codesign --verify --deep --strict "$apps/FinOrganizer.app"
+          # The updated app must start, work, and remove the leftover old copy.
+          "$apps/FinOrganizer.app/Contents/MacOS/FinOrganizer" --db "$RUNNER_TEMP/upd.db" --smoke-test &
+          pid=$!
+          for i in $(seq 1 120); do kill -0 $pid 2>/dev/null || break; sleep 1; done
+          if kill -0 $pid 2>/dev/null; then kill -9 $pid; echo "::error::updated app did not exit"; exit 1; fi
+          wait $pid || { echo "::error::updated app failed"; exit 1; }
+          sleep 2
+          test ! -e "$apps/.FinOrganizer.app.old" || { echo "::error::leftover old copy not cleaned up"; exit 1; }
+          echo "self-update with real hdiutil/ditto/codesign OK"
 
       - uses: actions/upload-artifact@v4
         with:
