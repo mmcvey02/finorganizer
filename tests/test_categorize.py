@@ -1,7 +1,9 @@
+import json
 import unittest
 
 from finorganizer import categorize, csvio, db, ledger as L
 from finorganizer.categorize import Categorizer, normalize_payee
+from finorganizer.server import App, respond
 
 
 def cat_name(conn, cat_id):
@@ -122,11 +124,11 @@ class FlowTests(unittest.TestCase):
         new = L.add_transaction(self.c, self.a, "2026-04-01", -900, "SQ *JOES TACO SHACK #9")
         self.assertEqual(L.get_transaction(self.c, new)["category_name"], "Dining Out")
 
-    def test_existing_transactions_are_sorted_once(self):
+    def test_recheck_sorts_what_is_waiting(self):
         L.add_transaction(self.c, self.a, "2026-03-01", -4500, "SAFEWAY 123", auto_categorize=False)
         L.add_transaction(self.c, self.a, "2026-03-02", -100, "UNKNOWN THING", auto_categorize=False)
-        self.assertEqual(categorize.backfill_once(self.c), 1)
-        self.assertEqual(categorize.backfill_once(self.c), 0)  # only on first run
+        self.assertEqual(categorize.recheck(self.c), 1)
+        self.assertEqual(categorize.recheck(self.c), 0)  # nothing new to match
         names = {t["payee"]: t["category_name"] for t in L.list_transactions(self.c)}
         self.assertEqual(names, {"SAFEWAY 123": "Groceries", "UNKNOWN THING": None})
 
@@ -135,6 +137,88 @@ class FlowTests(unittest.TestCase):
         L.add_transfer(self.c, self.a, sav, "2026-03-01", 5000)
         categorize.categorize_uncategorized(self.c)
         self.assertEqual({t["category_name"] for t in L.list_transactions(self.c)}, {"Transfer"})
+
+
+def call(app, method, path, body=None):
+    status, _, data, _ = respond(app, method, path, "", json.dumps(body).encode() if body is not None else b"")
+    assert status == 200, data
+    return json.loads(data)
+
+
+class ToggleTests(unittest.TestCase):
+    """Automatic categorization can be turned off in Settings (per profile)."""
+
+    def setUp(self):
+        self.app = App(db.connect(":memory:"))
+        self.c = self.app.conn
+        self.a = L.add_account(self.c, "Checking", "checking")
+
+    def payees(self):
+        return {t["payee"]: t["category_name"] for t in L.list_transactions(self.c)}
+
+    def test_on_by_default(self):
+        self.assertTrue(categorize.enabled(self.c))
+        self.assertTrue(call(self.app, "GET", "/api/meta")["auto_categorize"])
+
+    def test_off_leaves_new_transactions_alone(self):
+        self.assertEqual(call(self.app, "PUT", "/api/settings/auto-categorize", {"enabled": False}),
+                         {"enabled": False, "categorized": 0})
+        self.assertFalse(call(self.app, "GET", "/api/meta")["auto_categorize"])
+        call(self.app, "POST", "/api/transactions", {"account_id": self.a, "date": "2026-03-01",
+                                                     "amount_cents": -4500, "payee": "KROGER #12"})
+        csvio.import_csv(self.c, self.a, "Date,Description,Amount\n2026-03-02,NETFLIX.COM,-15.99\n")
+        self.assertEqual(self.payees(), {"KROGER #12": None, "NETFLIX.COM": None})
+        # Choosing a category yourself doesn't spread to other transactions either.
+        tx = [t for t in L.list_transactions(self.c) if t["payee"] == "KROGER #12"][0]
+        L.add_transaction(self.c, self.a, "2026-03-03", -2000, "KROGER #99")
+        r = call(self.app, "PUT", "/api/transactions/%d" % tx["id"],
+                 {"category_id": L.find_category(self.c, "Groceries")["id"]})
+        self.assertEqual(r["similar_updated"], 0)
+        self.assertIsNone(self.payees()["KROGER #99"])
+        # ...but the on-demand button still works.
+        self.assertEqual(call(self.app, "POST", "/api/transactions/auto-categorize")["categorized"], 2)
+
+    def test_turning_it_on_sorts_what_is_waiting(self):
+        categorize.set_enabled(self.c, False)
+        L.add_transaction(self.c, self.a, "2026-03-01", -4500, "KROGER #12")
+        r = call(self.app, "PUT", "/api/settings/auto-categorize", {"enabled": True})
+        self.assertEqual(r, {"enabled": True, "categorized": 1})
+        self.assertEqual(self.payees(), {"KROGER #12": "Groceries"})
+
+    def test_setting_is_per_profile_and_survives_reopening(self):
+        import tempfile, shutil, os
+        d = tempfile.mkdtemp()
+        try:
+            path = os.path.join(d, "fin.db")
+            c = db.connect(path)
+            categorize.set_enabled(c, False)
+            c.close()
+            c = db.connect(path)
+            self.assertFalse(categorize.enabled(c))
+            c.close()
+        finally:
+            shutil.rmtree(d)
+        self.assertTrue(categorize.enabled(self.c))
+
+    def test_new_transactions_trigger_a_recheck(self):
+        # Waiting: a merchant no rule knows.
+        L.add_transaction(self.c, self.a, "2026-03-01", -1200, "ZXQ HOLDINGS 4471")
+        self.assertIsNone(self.payees()["ZXQ HOLDINGS 4471"])
+        # A new transaction from that merchant, categorized by you, is new history...
+        rent = L.find_category(self.c, "Rent / Mortgage")
+        call(self.app, "POST", "/api/transactions", {"account_id": self.a, "date": "2026-04-01",
+                                                     "amount_cents": -1200, "payee": "ZXQ HOLDINGS 9",
+                                                     "category_id": rent["id"]})
+        # ...so the waiting one is matched right away.
+        self.assertEqual(self.payees()["ZXQ HOLDINGS 4471"], rent["name"])
+
+    def test_csv_categories_teach_older_transactions(self):
+        L.add_transaction(self.c, self.a, "2026-03-01", -800, "QRV PARTNERS 77")
+        self.assertIsNone(self.payees()["QRV PARTNERS 77"])
+        r = csvio.import_csv(self.c, self.a, "Date,Description,Amount,Category\n"
+                                             "2026-03-05,Qrv Partners 12,-9.50,Dining Out\n")
+        self.assertEqual(r["imported"], 1)
+        self.assertEqual(self.payees()["QRV PARTNERS 77"], "Dining Out")
 
 
 if __name__ == "__main__":

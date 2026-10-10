@@ -74,12 +74,15 @@ def build_router(app=None):
     r.add("GET", "/api/meta", lambda c, q, b: {
         "account_types": ACCOUNT_TYPES, "category_kinds": CATEGORY_KINDS,
         "frequencies": FREQUENCIES, "today": today().isoformat(),
-        "version": updater.current_version(), "can_self_update": updater.can_self_update()})
+        "version": updater.current_version(), "can_self_update": updater.can_self_update(),
+        "auto_categorize": categorize.enabled(c)})
+    r.add("PUT", "/api/settings/auto-categorize", lambda c, q, b: {
+        "enabled": bool(b.get("enabled")), "categorized": categorize.set_enabled(c, bool(b.get("enabled")))})
     def load_sample(c, q, b):
         if L.list_accounts(c, True):
             raise ValueError("sample data can only be added to an empty profile")
         sample.load_sample_data(c)
-        categorize.categorize_uncategorized(c)
+        categorize.recheck(c)
 
     r.add("POST", "/api/sample", load_sample)
     r.add("GET", "/api/dashboard", lambda c, q, b: reports.dashboard(c, q.get("month")))
@@ -108,17 +111,24 @@ def build_router(app=None):
             offset=_opt_int(q.get("offset")) or 0)
 
     def add_tx(c, q, b):
-        return {"id": L.add_transaction(
+        tid = L.add_transaction(
             c, _int(b.get("account_id"), "account_id"), b.get("date") or today(),
             _int(b.get("amount_cents"), "amount_cents"), b.get("payee", ""),
-            _opt_int(b.get("category_id")), b.get("memo", ""), bool(b.get("cleared")))}
+            _opt_int(b.get("category_id")), b.get("memo", ""), bool(b.get("cleared")))
+        if b.get("category_id"):
+            categorize.recheck(c)  # a category you chose is new history to match others against
+        return {"id": tid}
 
     def update_tx(c, q, b, i):
         if "category_id" in b:
             b["category_id"] = _opt_int(b["category_id"])
         L.update_transaction(c, i, **b)
-        # Your choice also sorts other uncategorized transactions from the same merchant.
-        similar = categorize.apply_to_similar(c, i) if b.get("category_id") else 0
+        similar = 0
+        if b.get("category_id") and categorize.enabled(c):
+            # Your choice also sorts other transactions from the same merchant, and is
+            # new history that may let still-uncategorized ones be matched.
+            similar = categorize.apply_to_similar(c, i)
+            categorize.recheck(c)
         return {"similar_updated": similar}
 
     r.add("GET", "/api/transactions", list_tx)
@@ -273,7 +283,7 @@ class App:
         self.profile_id = profile_id
         self.lock = threading.RLock()
         self.router = build_router(self)
-        categorize.backfill_once(self.conn)  # sort existing transactions on first run
+        categorize.recheck(self.conn)  # sort anything still waiting
 
     @property
     def profile_name(self):
@@ -293,7 +303,7 @@ class App:
                     except sqlite3.ProgrammingError:
                         self.conn = db.connect(path)
                 raise
-            categorize.backfill_once(self.conn)
+            categorize.recheck(self.conn)
             return backup.summary(self.conn)
 
     def switch(self, profile_id):
@@ -301,7 +311,7 @@ class App:
         new_conn = self.profiles.open(profile_id)
         old, self.conn, self.profile_id = self.conn, new_conn, profile_id
         old.close()
-        categorize.backfill_once(new_conn)
+        categorize.recheck(new_conn)
         self.profiles.remember(profile_id)
 
     def handle(self, method, path, query, body):

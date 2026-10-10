@@ -163,15 +163,17 @@ def find_category(conn, ref, create_kind=None):
 
 def add_transaction(conn, account_id, date, amount_cents, payee="", category_id=None,
                     memo="", cleared=False, commit=True, categorizer=None, auto_categorize=True):
-    """Record a transaction. Without a category, one is guessed when possible (see
-    categorize.py); pass ``categorizer`` to reuse one across a batch."""
+    """Record a transaction. Without a category, one is guessed when possible and
+    automatic categorization is on (see categorize.py); pass ``categorizer`` to
+    reuse one across a batch."""
     date = parse_date(date).isoformat()
     get_account(conn, account_id)
     auto = 0
     if category_id is None and auto_categorize and (payee or memo):
-        from .categorize import Categorizer
-        category_id = (categorizer or Categorizer(conn)).guess(payee, memo, int(amount_cents))
-        auto = int(category_id is not None)
+        from .categorize import Categorizer, enabled
+        if categorizer is not None or enabled(conn):
+            category_id = (categorizer or Categorizer(conn)).guess(payee, memo, int(amount_cents))
+            auto = int(category_id is not None)
     cur = conn.execute(
         "INSERT INTO transactions (account_id, date, amount_cents, payee, category_id, memo, cleared,"
         " auto_category) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",

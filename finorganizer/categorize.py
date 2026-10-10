@@ -13,6 +13,11 @@ For a transaction without a category we try, in order:
 Guesses are flagged (``auto_category = 1``) so the app can show them and so they
 never "teach" the history in step 1; only categories you chose (or confirmed by
 changing them) do. Categories that no longer exist are simply skipped.
+
+Automatic categorization can be turned off per profile (Settings). While it's on,
+every change that brings in new information (new transactions, a category you
+chose) re-checks all transactions that are still uncategorized, since a match that
+wasn't possible before may be now.
 """
 
 import re
@@ -149,14 +154,31 @@ def categorize_uncategorized(conn, categorizer=None):
     return changed
 
 
-def backfill_once(conn):
-    """Categorize existing transactions the first time a database is opened by this version."""
-    if row(conn.execute("SELECT value FROM settings WHERE key = 'autocat_backfill_v1'")):
-        return 0
-    n = categorize_uncategorized(conn)
-    conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('autocat_backfill_v1', '1')")
+SETTING = "auto_categorize"
+
+
+def enabled(conn):
+    """Whether automatic categorization is on for this profile (it is unless turned off)."""
+    r = row(conn.execute("SELECT value FROM settings WHERE key = ?", (SETTING,)))
+    return r is None or r["value"] != "0"
+
+
+def set_enabled(conn, on):
+    """Turn automatic categorization on or off. Turning it on sorts what's waiting;
+    returns how many transactions that categorized."""
+    conn.execute("INSERT INTO settings (key, value) VALUES (?, ?)"
+                 " ON CONFLICT (key) DO UPDATE SET value = excluded.value", (SETTING, "1" if on else "0"))
     conn.commit()
-    return n
+    return recheck(conn)
+
+
+def recheck(conn):
+    """Look again at every uncategorized transaction, if automatic categorization is on.
+
+    Called whenever new transactions arrive or you choose a category: either can make
+    a match possible that wasn't before. Returns how many were categorized.
+    """
+    return categorize_uncategorized(conn) if enabled(conn) else 0
 
 
 def apply_to_similar(conn, tx_id):

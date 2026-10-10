@@ -19,7 +19,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from .categorize import Categorizer
+from .categorize import Categorizer, enabled, recheck
 from .db import row, rows
 from .ledger import NotFound, add_account, detect_transfers, get_account
 from .money import to_cents
@@ -369,7 +369,7 @@ def _import_transactions(conn, account_id, txns, categorizer):
                          (ext, manual[0]))
             matched += 1
             continue
-        category_id = categorizer.guess(payee, memo, amount)
+        category_id = categorizer.guess(payee, memo, amount) if categorizer else None
         conn.execute(
             "INSERT INTO transactions (account_id, date, amount_cents, payee, category_id, memo,"
             " cleared, external_id, auto_category) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)",
@@ -429,7 +429,7 @@ def sync_connection(conn, connection_id, today=None, _rerun=False):
 
     result = {"connection_id": connection_id, "label": c["label"], "imported": 0, "matched": 0,
               "added_accounts": added, "errors": []}
-    categorizer = Categorizer(conn)
+    categorizer = Categorizer(conn) if enabled(conn) else None
     discovered = []
     try:
         remote_by_id = {}
@@ -484,6 +484,8 @@ def sync_connection(conn, connection_id, today=None, _rerun=False):
         result["transfers_linked"] = result.get("transfers_linked", 0) + more.get("transfers_linked", 0)
         result["added_accounts"] += discovered
         result["errors"] += [e for e in more["errors"] if e not in result["errors"]]
+    if result["imported"] and not _rerun:
+        recheck(conn)
     return result
 
 

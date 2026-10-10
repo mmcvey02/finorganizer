@@ -231,3 +231,17 @@ button.pill { border: none; cursor: pointer; font: inherit; font-size: 11px; pad
   background: var(--surface-2); color: var(--text-2); }
 button.pill:hover { background: var(--border); }
 a.btn { text-decoration: none; display: inline-block; line-height: 1.45; }
+[hidden] { display: none !important; }  /* hidden wins over display rules like a.btn */
+
+/* Settings toggles */
+.switch-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; cursor: pointer; }
+.switch-row > span { display: grid; gap: 4px; }
+input.switch { appearance: none; -webkit-appearance: none; flex: none; position: relative; width: 44px; height: 26px;
+  margin: 0; border-radius: 13px; background: var(--border); cursor: pointer; transition: background 0.15s; }
+input.switch::before { content: ""; position: absolute; top: 3px; left: 3px; width: 20px; height: 20px; border-radius: 50%;
+  background: #fff; box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25); transition: transform 0.15s; }
+input.switch:checked { background: var(--accent); }
+input.switch:checked::before { transform: translateX(18px); }
+input.switch:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+input.switch:disabled { opacity: 0.6; }
+@media (prefers-reduced-motion: reduce) { input.switch, input.switch::before { transition: none; } }

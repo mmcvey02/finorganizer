@@ -155,6 +155,10 @@ SimpleFIN site) cuts off access.
   retirement and property, with balances, interest rates and archiving.
 - Transactions with payees, categories, memos and a cleared flag; search and filter by account,
   category, date range or uncategorized.
+- Automatic categorization (on by default; ⚙ Settings → Categories turns it off per profile):
+  new transactions get a category from your own history and common merchants, and every new
+  transaction or category you choose re-checks the ones still uncategorized. Guesses are marked
+  "auto"; anything unrecognized stays uncategorized.
 - Transfers between accounts (card payments, savings deposits, loan payments) are recorded as
   linked pairs and never counted as income or spending.
 - Bank CSV import that detects common column layouts (amount, or debit/credit columns), supports

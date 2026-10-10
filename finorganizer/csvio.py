@@ -5,7 +5,7 @@ import datetime as dt
 import io
 
 from .ledger import add_transaction, find_category, list_transactions
-from .categorize import Categorizer
+from .categorize import Categorizer, enabled, recheck
 from .money import to_cents
 
 DATE_FORMATS = ("%Y-%m-%d", "%m/%d/%Y", "%m/%d/%y", "%d/%m/%Y", "%Y/%m/%d", "%d.%m.%Y",
@@ -64,7 +64,7 @@ def import_csv(conn, account_id, text, invert=False, day_first=False, skip_dupli
     """
     reader = csv.DictReader(io.StringIO(text.lstrip("﻿")))
     mapping = _map_columns(reader.fieldnames or [])
-    categorizer = Categorizer(conn)
+    categorizer = Categorizer(conn) if enabled(conn) else None
     existing = set()
     if skip_duplicates:
         for r in conn.execute("SELECT date, amount_cents, LOWER(payee) FROM transactions"
@@ -95,11 +95,13 @@ def import_csv(conn, account_id, text, invert=False, day_first=False, skip_dupli
                 continue
             existing.add(key)
             add_transaction(conn, account_id, date, amount, payee, category_id, memo, commit=False,
-                            categorizer=categorizer)
+                            categorizer=categorizer, auto_categorize=categorizer is not None)
             imported += 1
         except (ValueError, KeyError, LookupError) as e:
             errors.append("line %d: %s" % (lineno, e))
     conn.commit()
+    if imported:
+        recheck(conn)  # categories in the file can make other matches possible
     return {"imported": imported, "duplicates": duplicates, "errors": errors}
 
 

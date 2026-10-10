@@ -13,7 +13,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from finorganizer import banksync, db, ledger as L, summary_page
+from finorganizer import banksync, categorize, db, ledger as L, summary_page
 from finorganizer.profiles import Profiles
 from finorganizer.sample import load_sample_data
 from finorganizer.server import App, make_handler
@@ -172,6 +172,15 @@ class BankSyncTests(unittest.TestCase):
         # Syncing again never duplicates.
         again = banksync.sync_connection(self.c, r["id"], today=TODAY + dt.timedelta(days=1))
         self.assertEqual((again["imported"], again["matched"], again["added_accounts"]), (0, 0, []))
+
+    def test_downloads_follow_the_auto_categorize_setting(self):
+        categorize.set_enabled(self.c, False)
+        banksync.connect(self.c, self.fake.token("autocat-off"))
+        cats = {t["payee"]: t["category_name"] for t in L.list_transactions(self.c)}
+        self.assertEqual(set(cats.values()), {None})  # off: nothing guessed
+        categorize.set_enabled(self.c, True)          # on again: what's waiting is sorted
+        cats = {t["payee"]: t["category_name"] for t in L.list_transactions(self.c)}
+        self.assertEqual(cats["PAYROLL ACME"], "Salary")
 
     def test_dont_import_is_respected(self):
         cid = banksync.add_connection(self.c, "http://user:s3cret@127.0.0.1:%d/simplefin" % self.fake.port)["id"]

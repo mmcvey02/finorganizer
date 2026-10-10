@@ -814,6 +814,17 @@ pages.settings = async () => {
       <p class="muted small">Updates replace only the program. Your data, profiles and bank connections are kept.</p>
     </div>`}
     <div style="height:16px"></div>
+    <div class="card"><h2>Categories</h2>
+      <label class="switch-row">
+        <span><strong>Categorize transactions automatically</strong>
+          <span class="muted small">New transactions (typed in, imported or downloaded from your bank) get a category
+          from your own history and common merchants; each new one also re-checks those still uncategorized. Guesses are
+          marked <span class="pill info">auto</span>. When off, transactions stay uncategorized until you choose
+          (the Auto-categorize button on Transactions still works).${profileState.profiles.length > 1 ? ` Applies to ${esc(currentProfileName())}.` : ""}</span></span>
+        <input type="checkbox" role="switch" class="switch" id="autocat-toggle" ${store.meta.auto_categorize === false ? "" : "checked"}>
+      </label>
+    </div>
+    <div style="height:16px"></div>
     <div class="card"><h2>Your data</h2>
       <p class="muted">A backup is a single file with everything in the current profile${profileState.profiles.length > 1 ? ` (<strong>${esc(currentProfileName())}</strong>)` : ""}.
         Restore it here or in FinOrganizer on another device to move your data${web() ? ", for example from your computer to this phone" : ", for example to the iPhone version"}.</p>
@@ -826,6 +837,7 @@ pages.settings = async () => {
     <div style="height:16px"></div>
     <div id="profiles-section"></div>`;
   $("#restore-btn").onclick = restoreBackup;
+  $("#autocat-toggle").onchange = (e) => setAutoCategorize(e.target);
   if (web()) { await renderProfiles($("#profiles-section")); return; }
   const show = (u) => {
     $("#latest-version").textContent = u.latest || "–";
@@ -849,6 +861,21 @@ pages.settings = async () => {
 };
 
 pages.profiles = pages.settings;
+
+async function setAutoCategorize(box) {
+  const on = box.checked;
+  box.disabled = true;
+  try {
+    const r = await attempt(() => api("PUT", "/api/settings/auto-categorize", { enabled: on }));
+    if (!r) { box.checked = !on; return; }
+    store.meta.auto_categorize = on;
+    toast(!on ? "Automatic categorization is off"
+      : r.categorized ? `Automatic categorization is on: categorized ${r.categorized} waiting transaction${r.categorized === 1 ? "" : "s"}`
+      : "Automatic categorization is on");
+  } finally {
+    box.disabled = false;
+  }
+}
 
 const currentProfileName = () => (profileState.profiles.find((p) => p.id === profileState.current) || {}).name || "Default";
 
