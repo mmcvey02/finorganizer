@@ -37,16 +37,18 @@ def month_summary(conn, month):
     return s
 
 
-def spending_by_category(conn, start, end):
+def spending_by_category(conn, start=None, end=None, account_id=None):
+    """Spending per category (refunds net out), largest first. Transfers between your
+    own accounts aren't spending. ``start``/``end``/``account_id`` narrow it down."""
     data = rows(conn.execute(
-        """SELECT COALESCE(c.name, 'Uncategorized') AS category_name,
+        """SELECT c.id AS category_id, COALESCE(c.name, 'Uncategorized') AS category_name,
                   COALESCE(c.group_name, '') AS group_name,
                   -SUM(t.amount_cents) AS spent_cents, COUNT(*) AS count
            FROM transactions t LEFT JOIN categories c ON c.id = t.category_id
-           WHERE t.date BETWEEN ? AND ? AND """ + _NOT_TRANSFER + """
+           WHERE t.date BETWEEN ? AND ? AND (? IS NULL OR t.account_id = ?) AND """ + _NOT_TRANSFER + """
              AND (c.kind = 'expense' OR (c.id IS NULL AND t.amount_cents < 0))
-           GROUP BY category_name HAVING spent_cents > 0 ORDER BY spent_cents DESC""",
-        (start, end),
+           GROUP BY c.id HAVING spent_cents > 0 ORDER BY spent_cents DESC""",
+        (start or "0001-01-01", end or "9999-12-31", account_id, account_id),
     ))
     total = sum(d["spent_cents"] for d in data)
     for d in data:

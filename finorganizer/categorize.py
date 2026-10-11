@@ -5,10 +5,13 @@ For a transaction without a category we try, in order:
 1. Your own history: the category you've used most for the same merchant. Bank
    descriptions are normalized first, so "SQ *BLUE BOTTLE COFFEE #123 SAN FRANCISCO CA"
    and "Blue Bottle Coffee" count as the same merchant.
-2. Built-in rules: well-known merchants and keywords (Kroger -> Groceries,
+2. Money moved between your own accounts: text that says it's a transfer and names
+   one of your accounts ("Online transfer to Savings") goes in the Transfer category,
+   so it isn't counted as spending or income.
+3. Built-in rules: well-known merchants and keywords (Kroger -> Groceries,
    Netflix -> Subscriptions, Payroll -> Salary, ...). Rules know whether money is
    coming in or going out, so a refund from a store isn't treated as spending.
-3. Otherwise the transaction stays uncategorized.
+4. Otherwise the transaction stays uncategorized.
 
 Guesses are flagged (``auto_category = 1``) so the app can show them and so they
 never "teach" the history in step 1; only categories you chose (or confirmed by
@@ -24,6 +27,7 @@ import re
 from collections import Counter
 
 from .db import row, rows
+from .ledger import looks_like_transfer, reconcile_transfers
 
 # Words that say how a payment was made rather than who it was paid to.
 NOISE = {
@@ -103,6 +107,15 @@ class Categorizer:
             key = normalize_payee(r[0])
             if key:
                 counts.setdefault(key, Counter())[r[1]] += 1
+        transfer = row(conn.execute("SELECT id FROM categories WHERE kind = 'transfer' ORDER BY id"))
+        self.transfer_category = transfer["id"] if transfer else None
+        # Ways a description can name one of your accounts: its name, or its type
+        # ("savings") when you have an account of that type.
+        accounts = rows(conn.execute("SELECT name, type FROM accounts WHERE archived = 0"))
+        words = {a["name"].strip().lower() for a in accounts if len(a["name"].strip()) >= 3}
+        words |= {t for t in ("savings", "checking") if any(a["type"] == t for a in accounts)}
+        self._own_account = re.compile(r"(?<![a-z0-9])(%s)(?![a-z0-9])" % "|".join(
+            re.escape(w) for w in sorted(words, key=len, reverse=True))) if words else None
         self.history = {}
         for key, c in counts.items():
             cat, n = c.most_common(1)[0]
@@ -129,6 +142,9 @@ class Categorizer:
                         break
             if hit is not None and self._fits(hit, amount_cents):
                 return hit
+        if (self.transfer_category and self._own_account and looks_like_transfer(payee, memo)
+                and self._own_account.search(" ".join((payee or "", memo or "")).lower())):
+            return self.transfer_category
         text = " ".join(re.sub(r"[^a-z&]+", " ", (s or "").lower()) for s in (payee, memo))
         for name, direction, pattern in _COMPILED:
             if direction == "in" and amount_cents <= 0 or direction == "out" and amount_cents > 0:
@@ -179,6 +195,12 @@ def recheck(conn):
     a match possible that wasn't before. Returns how many were categorized.
     """
     return categorize_uncategorized(conn) if enabled(conn) else 0
+
+
+def process_new(conn):
+    """Run after new transactions arrive: categorize what's waiting, then pair up money
+    moved between your own accounts. Returns (categorized, transfers)."""
+    return recheck(conn), reconcile_transfers(conn)
 
 
 def apply_to_similar(conn, tx_id):

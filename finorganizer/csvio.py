@@ -5,7 +5,7 @@ import datetime as dt
 import io
 
 from .ledger import add_transaction, find_category, list_transactions
-from .categorize import Categorizer, enabled, recheck
+from .categorize import Categorizer, enabled, process_new
 from .money import to_cents
 
 DATE_FORMATS = ("%Y-%m-%d", "%m/%d/%Y", "%m/%d/%y", "%d/%m/%Y", "%Y/%m/%d", "%d.%m.%Y",
@@ -101,7 +101,7 @@ def import_csv(conn, account_id, text, invert=False, day_first=False, skip_dupli
             errors.append("line %d: %s" % (lineno, e))
     conn.commit()
     if imported:
-        recheck(conn)  # categories in the file can make other matches possible
+        process_new(conn)  # categories in the file can make other matches possible
     return {"imported": imported, "duplicates": duplicates, "errors": errors}
 
 

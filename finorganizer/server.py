@@ -115,8 +115,7 @@ def build_router(app=None):
             c, _int(b.get("account_id"), "account_id"), b.get("date") or today(),
             _int(b.get("amount_cents"), "amount_cents"), b.get("payee", ""),
             _opt_int(b.get("category_id")), b.get("memo", ""), bool(b.get("cleared")))
-        if b.get("category_id"):
-            categorize.recheck(c)  # a category you chose is new history to match others against
+        categorize.process_new(c)  # new history to match others against; maybe a transfer's other side
         return {"id": tid}
 
     def update_tx(c, q, b, i):
@@ -138,6 +137,15 @@ def build_router(app=None):
     r.add("PUT", r"/api/transactions/(\d+)", update_tx)
     r.add("DELETE", r"/api/transactions/(\d+)", lambda c, q, b, i: L.delete_transaction(c, i))
     r.add("POST", r"/api/transactions/(\d+)/unlink-transfer", lambda c, q, b, i: L.unlink_transfer(c, i))
+
+    def make_transfer(c, q, b, i):
+        other = _opt_int(b.get("account_id"))
+        if other is None:  # the other account isn't tracked here: just don't count it
+            L.update_transaction(c, i, category_id=L.find_category(c, "Transfer", create_kind="transfer")["id"])
+            return {"created": False, "similar": 0, "account_name": None}
+        return L.make_transfer(c, i, other, bool(b.get("remember")))
+
+    r.add("POST", r"/api/transactions/(\d+)/transfer", make_transfer)
     r.add("POST", "/api/transfers", lambda c, q, b: {"ids": L.add_transfer(
         c, _int(b.get("from_account_id")), _int(b.get("to_account_id")), b.get("date") or today(),
         _int(b.get("amount_cents")), b.get("memo", ""))})
@@ -183,6 +191,13 @@ def build_router(app=None):
                 "top_payees": reports.top_payees(c, start, end)}
 
     r.add("GET", "/api/reports/spending", spending)
+
+    def spending_breakdown(c, q, b):
+        data = reports.spending_by_category(c, q.get("start") or None, q.get("end") or None,
+                                            _opt_int(q.get("account_id")))
+        return {"categories": data, "total_cents": sum(d["spent_cents"] for d in data)}
+
+    r.add("GET", "/api/reports/spending-by-category", spending_breakdown)
     r.add("GET", "/api/reports/cashflow",
           lambda c, q, b: reports.cash_flow(c, _int(q.get("months", 12)), q.get("end_month")))
     r.add("GET", "/api/reports/networth",
@@ -283,7 +298,7 @@ class App:
         self.profile_id = profile_id
         self.lock = threading.RLock()
         self.router = build_router(self)
-        categorize.recheck(self.conn)  # sort anything still waiting
+        categorize.process_new(self.conn)  # sort anything still waiting
 
     @property
     def profile_name(self):
@@ -303,7 +318,7 @@ class App:
                     except sqlite3.ProgrammingError:
                         self.conn = db.connect(path)
                 raise
-            categorize.recheck(self.conn)
+            categorize.process_new(self.conn)
             return backup.summary(self.conn)
 
     def switch(self, profile_id):
@@ -311,7 +326,7 @@ class App:
         new_conn = self.profiles.open(profile_id)
         old, self.conn, self.profile_id = self.conn, new_conn, profile_id
         old.close()
-        categorize.recheck(new_conn)
+        categorize.process_new(new_conn)
         self.profiles.remember(profile_id)
 
     def handle(self, method, path, query, body):

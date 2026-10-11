@@ -2,6 +2,8 @@
 goals and recurring items. Every function takes an open sqlite3 connection.
 """
 
+import re
+
 from .db import ACCOUNT_TYPES, CATEGORY_KINDS, FREQUENCIES, row, rows
 from .money import next_occurrence, parse_date, parse_month, today
 
@@ -205,10 +207,12 @@ def add_transfer(conn, from_account_id, to_account_id, date, amount_cents, memo=
 
 TX_SELECT = """
     SELECT t.*, a.name AS account_name, c.name AS category_name, c.kind AS category_kind,
-           c.group_name AS category_group
+           c.group_name AS category_group, oa.name AS transfer_account_name
     FROM transactions t
     JOIN accounts a ON a.id = t.account_id
     LEFT JOIN categories c ON c.id = t.category_id
+    LEFT JOIN transactions o ON o.id = t.transfer_id
+    LEFT JOIN accounts oa ON oa.id = o.account_id
 """
 
 
@@ -285,27 +289,46 @@ def unlink_transfer(conn, tx_id):
     if not tx["transfer_id"]:
         raise ValueError("that transaction isn't a transfer")
     other = tx["transfer_id"]
-    conn.execute("UPDATE transactions SET transfer_id = NULL, category_id = NULL WHERE id IN (?, ?)",
-                 (tx_id, other))
-    conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, '1')", (_pair_key(tx_id, other),))
+    conn.execute("UPDATE transactions SET transfer_id = NULL, category_id = NULL, auto_category = 0"
+                 " WHERE id IN (?, ?)", (tx_id, other))
+    conn.executemany("INSERT OR REPLACE INTO settings (key, value) VALUES (?, '1')",
+                     [(_pair_key(tx_id, other),), ("not_transfer_tx:%d" % tx_id,), ("not_transfer_tx:%d" % other,)])
+    # An entry FinOrganizer added to complete the transfer has no reason to exist any more.
+    for side in (tx_id, other):
+        if row(conn.execute("SELECT 1 FROM settings WHERE key = ?", ("transfer_created:%d" % side,))):
+            conn.execute("DELETE FROM transactions WHERE id = ?", (side,))
+            conn.execute("DELETE FROM settings WHERE key = ?", ("transfer_created:%d" % side,))
     conn.commit()
 
 
-def detect_transfers(conn):
-    """Link bank-downloaded money moving between your own accounts as transfers.
+# Words banks and people use for money moved between accounts.
+_TRANSFER_TEXT = re.compile(r"(?<![a-z])(transfer|xfer|trnsfr)", re.I)
 
-    A card payment shows up twice when both accounts are linked: money out of checking
-    and money into the card. Left alone, that counts as both spending and income. A pair
-    is linked only when the amounts match exactly, the accounts differ, the dates are at
-    most a few days apart and each side has exactly one possible partner. Pairs the user
-    split apart ("Not a transfer") are never re-linked. Returns the number of pairs linked.
+
+def looks_like_transfer(*texts):
+    return any(_TRANSFER_TEXT.search(t or "") for t in texts)
+
+
+def detect_transfers(conn):
+    """Pair up money moving between your own accounts so it isn't counted as spending
+    and income: e.g. $600 out of checking and $600 into savings.
+
+    A pair is linked only when the amounts are opposite and equal, the accounts differ,
+    the dates are at most a few days apart and each side has exactly one possible
+    partner. Both sides must have come from your banks, or at least one of them must say
+    so ("Transfer to savings") or be in the Transfer category. Transactions you put in
+    another category yourself, and pairs you split apart ("Not a transfer"), are left
+    alone. Returns the number of pairs linked.
     """
     cands = rows(conn.execute(
-        "SELECT id, account_id, date, amount_cents FROM transactions"
-        " WHERE transfer_id IS NULL AND external_id IS NOT NULL AND amount_cents != 0"))
+        "SELECT t.id, t.account_id, t.date, t.amount_cents, t.payee, t.memo, t.external_id,"
+        " c.kind AS kind FROM transactions t LEFT JOIN categories c ON c.id = t.category_id"
+        " WHERE t.transfer_id IS NULL AND t.amount_cents != 0"
+        " AND (t.category_id IS NULL OR COALESCE(t.auto_category, 0) = 1 OR c.kind = 'transfer')"))
     rejected = {r[0] for r in conn.execute("SELECT key FROM settings WHERE key LIKE 'not_transfer:%'")}
     by_amount = {}
     for t in cands:
+        t["says_transfer"] = t["kind"] == "transfer" or looks_like_transfer(t["payee"], t["memo"])
         by_amount.setdefault(t["amount_cents"], []).append(t)
 
     def partners(t):
@@ -313,6 +336,7 @@ def detect_transfers(conn):
         return [o for o in by_amount.get(-t["amount_cents"], [])
                 if o["account_id"] != t["account_id"]
                 and abs((parse_date(o["date"]) - d).days) <= TRANSFER_MATCH_DAYS
+                and ((t["external_id"] and o["external_id"]) or t["says_transfer"] or o["says_transfer"])
                 and _pair_key(t["id"], o["id"]) not in rejected]
 
     linked, used = 0, set()
@@ -326,6 +350,99 @@ def detect_transfers(conn):
             linked += 1
     conn.commit()
     return linked
+
+
+def _rule_key(account_id, payee):
+    from .categorize import normalize_payee
+    key = normalize_payee(payee)
+    return "transfer_rule:%d:%s" % (account_id, key) if key else None
+
+
+def make_transfer(conn, tx_id, other_account_id, remember=False):
+    """Treat a transaction as money moved to (or from) another of your accounts.
+
+    The matching entry in the other account is linked if it's already there (opposite
+    amount, within a few days); otherwise it's added, so both balances are right. With
+    ``remember``, future transactions from the same payee in this account are treated
+    the same way, and so are the ones already there. Returns a summary dict.
+    """
+    tx = get_transaction(conn, tx_id)
+    if tx["transfer_id"]:
+        raise ValueError("that transaction is already a transfer")
+    other = get_account(conn, other_account_id)
+    if other["id"] == tx["account_id"]:
+        raise ValueError("choose a different account than the transaction's own")
+    created = _link_or_create(conn, tx, other)
+    similar = 0
+    if remember:
+        key = _rule_key(tx["account_id"], tx["payee"])
+        if key:
+            conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, str(other["id"])))
+            similar = apply_transfer_rules(conn)
+    conn.commit()
+    return {"created": created, "similar": similar, "account_name": other["name"]}
+
+
+def _link_or_create(conn, tx, other):
+    """Link ``tx`` with its counterpart in account ``other``, adding one if needed.
+    Returns True if a counterpart was added."""
+    d = parse_date(tx["date"])
+    near = [o for o in rows(conn.execute(
+        "SELECT t.id, t.date FROM transactions t LEFT JOIN categories c ON c.id = t.category_id"
+        " WHERE t.account_id = ? AND t.amount_cents = ? AND t.transfer_id IS NULL",
+        (other["id"], -tx["amount_cents"])))
+        if abs((parse_date(o["date"]) - d).days) <= TRANSFER_MATCH_DAYS
+        and not row(conn.execute("SELECT 1 FROM settings WHERE key = ?", (_pair_key(tx["id"], o["id"]),)))]
+    if near:
+        partner = min(near, key=lambda o: abs((parse_date(o["date"]) - d).days))["id"]
+        created = False
+    else:
+        source = get_account(conn, tx["account_id"])["name"]
+        payee = ("Transfer from %s" if tx["amount_cents"] < 0 else "Transfer to %s") % source
+        partner = conn.execute(
+            "INSERT INTO transactions (account_id, date, amount_cents, payee, memo, cleared)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            (other["id"], tx["date"], -tx["amount_cents"], payee, tx["payee"] or "", tx["cleared"])).lastrowid
+        conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, '1')",
+                     ("transfer_created:%d" % partner,))
+        created = True
+    out_id, in_id = (tx["id"], partner) if tx["amount_cents"] < 0 else (partner, tx["id"])
+    link_transfer(conn, out_id, in_id)
+    return created
+
+
+def apply_transfer_rules(conn):
+    """Turn transactions covered by a remembered transfer (see make_transfer) into
+    transfers. Skips ones you put in another category yourself or split apart.
+    Returns how many were turned into transfers."""
+    rules = {r[0]: int(r[1]) for r in conn.execute("SELECT key, value FROM settings WHERE key LIKE 'transfer_rule:%'")}
+    if not rules:
+        return 0
+    accounts = {a["id"]: a for a in rows(conn.execute("SELECT * FROM accounts"))}
+    skip = {r[0] for r in conn.execute("SELECT key FROM settings WHERE key LIKE 'not_transfer_tx:%'")}
+    done = 0
+    for t in rows(conn.execute(
+            "SELECT t.* FROM transactions t LEFT JOIN categories c ON c.id = t.category_id"
+            " WHERE t.transfer_id IS NULL AND t.amount_cents != 0 AND t.payee != ''"
+            " AND (t.category_id IS NULL OR COALESCE(t.auto_category, 0) = 1 OR c.kind = 'transfer')"
+            " ORDER BY t.date, t.id")):
+        target = rules.get(_rule_key(t["account_id"], t["payee"]))
+        if target is None or target not in accounts or target == t["account_id"]:
+            continue
+        if "not_transfer_tx:%d" % t["id"] in skip:
+            continue
+        if not row(conn.execute("SELECT 1 FROM transactions WHERE id = ? AND transfer_id IS NULL", (t["id"],))):
+            continue  # became the other side of a transfer earlier in this loop
+        _link_or_create(conn, t, accounts[target])
+        done += 1
+    conn.commit()
+    return done
+
+
+def reconcile_transfers(conn):
+    """Everything that turns money moving between your accounts into transfers; run
+    after new transactions arrive. Returns how many transfers were made."""
+    return detect_transfers(conn) + apply_transfer_rules(conn)
 
 
 def delete_transaction(conn, tx_id):

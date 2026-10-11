@@ -182,6 +182,17 @@ class BankSyncTests(unittest.TestCase):
         cats = {t["payee"]: t["category_name"] for t in L.list_transactions(self.c)}
         self.assertEqual(cats["PAYROLL ACME"], "Salary")
 
+    def test_bank_copy_of_a_transfer_side_is_not_duplicated(self):
+        mine = L.add_account(self.c, "Checking", "checking", 0)
+        sav = L.add_account(self.c, "Savings", "savings", 0)
+        tid = L.add_transaction(self.c, sav, "2026-10-02", 45490, "Moved in 9")
+        L.make_transfer(self.c, tid, mine)  # adds the -454.90 to Checking
+        banksync.connect(self.c, self.fake.token("transfer-side"))
+        out = [t for t in L.list_transactions(self.c, account_id=mine) if t["amount_cents"] == -45490]
+        self.assertEqual(len(out), 1)  # the bank's copy was attached, not added again
+        self.assertTrue(out[0]["external_id"])
+        self.assertEqual(out[0]["transfer_id"], tid)
+
     def test_dont_import_is_respected(self):
         cid = banksync.add_connection(self.c, "http://user:s3cret@127.0.0.1:%d/simplefin" % self.fake.port)["id"]
         banksync.link_remote(self.c, self.remote("Rewards Visa")["id"], "ignore")

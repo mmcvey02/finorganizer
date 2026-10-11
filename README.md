@@ -159,8 +159,14 @@ SimpleFIN site) cuts off access.
   new transactions get a category from your own history and common merchants, and every new
   transaction or category you choose re-checks the ones still uncategorized. Guesses are marked
   "auto"; anything unrecognized stays uncategorized.
-- Transfers between accounts (card payments, savings deposits, loan payments) are recorded as
-  linked pairs and never counted as income or spending.
+- Transfers between your accounts (card payments, savings deposits, loan payments) are recorded
+  as linked pairs and never counted as income or spending: moving $600 to savings isn't $600
+  lost. Both sides are paired automatically when they show up (from banks, CSV or typed in);
+  "Transfer to Savings" with only one side known goes in the Transfer category. For anything
+  else, **Transfer…** on a transaction records it in the other account too (both balances stay
+  right) and can remember the payee for next time.
+- Spending analyzer on the Transactions page: a pie chart of spending by category for the
+  chosen dates and account. Click a slice (or its row) to list just that category.
 - Bank CSV import that detects common column layouts (amount, or debit/credit columns), supports
   day-first dates and sign flipping, skips duplicates, and auto-categorizes payees you've seen before.
 - CSV export.

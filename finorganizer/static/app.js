@@ -432,11 +432,20 @@ async function importCSV(defaultAccount) {
   if (r.errors.length) console.warn("Import errors:", r.errors);
 }
 
+// Money moved between your own accounts: not spending or income.
+const isTransfer = (t) => !!t.transfer_id || t.category_kind === "transfer";
+
 pages.transactions = async (params) => {
   const f = Object.fromEntries(params);
   const qs = new URLSearchParams({ ...f, limit: 500 });
-  const [txs, conns] = await Promise.all([GET(`/api/transactions?${qs}`), bankConnections()]);
-  const total = txs.reduce((s, t) => s + t.amount_cents, 0);
+  const showChart = pref("txChart", "on") === "on";
+  const pieQ = new URLSearchParams(Object.entries({ start: f.start, end: f.end, account_id: f.account_id }).filter(([, v]) => v));
+  const [txs, conns, spend] = await Promise.all([GET(`/api/transactions?${qs}`), bankConnections(),
+    showChart ? GET(`/api/reports/spending-by-category?${pieQ}`) : null]);
+  const counted = txs.filter((t) => !isTransfer(t));
+  const moneyIn = counted.reduce((s, t) => s + Math.max(0, t.amount_cents), 0);
+  const moneyOut = counted.reduce((s, t) => s - Math.min(0, t.amount_cents), 0);
+  const transfers = txs.length - counted.length;
   const lastSync = conns.map((c) => c.last_sync).filter(Boolean).sort().pop();
   const syncErrors = conns.filter((c) => c.last_error);
   view.innerHTML = `
@@ -450,6 +459,8 @@ pages.transactions = async (params) => {
       <button id="add">+ Transaction</button></div>
     ${syncErrors.map((c) => `<div class="insight warning"><span class="icon">!</span><span>${esc(c.label)}: ${esc(c.last_error)}
       <a href="#accounts">Fix on the Accounts page</a></span></div>`).join("")}
+    ${showChart ? spendAnalyzer(spend, f) : `<div class="filters" style="justify-content:flex-end;margin-bottom:8px">
+      <button class="link" id="chart-toggle">Show spending chart</button></div>`}
     <div class="card">
       <form class="filters" id="filters">
         <input name="search" placeholder="Search payee or memo" value="${esc(f.search || "")}">
@@ -460,16 +471,19 @@ pages.transactions = async (params) => {
         <label class="check"><input type="checkbox" name="uncategorized" value="1" ${f.uncategorized ? "checked" : ""}> Uncategorized only</label>
         <button class="ghost" type="button" id="clear">Clear</button>
       </form>
-      <div class="muted small" style="margin-bottom:6px">${txs.length}${txs.length === 500 ? "+" : ""} transactions · net ${money(total)}</div>
+      <div class="muted small" style="margin-bottom:6px">${txs.length}${txs.length === 500 ? "+" : ""} transaction${txs.length === 1 ? "" : "s"} ·
+        money in ${money(moneyIn)} · money out ${money(moneyOut)}${transfers ? ` · ${transfers} transfer${transfers === 1 ? "" : "s"} between your accounts not counted` : ""}</div>
       <div class="table-wrap"><table>
         <thead><tr><th>Date</th><th>Payee</th><th class="hide-sm">Account</th><th>Category</th><th class="num">Amount</th><th></th></tr></thead>
         <tbody>${txs.length ? txs.map((t) => `<tr data-id="${t.id}">
           <td>${esc(t.date)}</td>
           <td>${esc(t.payee)}${t.external_id ? ' <span class="pill info" title="Downloaded from your bank">bank</span>' : ""}${t.memo ? `<div class="muted small">${esc(t.memo)}</div>` : ""}</td>
           <td class="hide-sm">${esc(t.account_name)}</td>
-          <td>${t.transfer_id ? `<button type="button" class="pill unlink" title="Money moved between your own accounts; not counted as spending or income. Click if this isn't a transfer.">Transfer</button>` : `<select class="cat" aria-label="Category">${categoryOptions(t.category_id)}</select>${t.auto_category ? ' <span class="pill auto-tag" title="Guessed automatically. Pick another category if it\'s wrong; FinOrganizer will remember.">auto</span>' : ""}`}</td>
+          <td>${t.transfer_id ? `<button type="button" class="pill unlink" title="Money moved between your own accounts; not counted as spending or income. Click if this isn't a transfer.">Transfer</button>
+              <span class="muted small">${t.amount_cents < 0 ? "to" : "from"} ${esc(t.transfer_account_name || "")}</span>`
+            : `<select class="cat" aria-label="Category">${categoryOptions(t.category_id)}</select>${t.auto_category ? ' <span class="pill auto-tag" title="Guessed automatically. Pick another category if it\'s wrong; FinOrganizer will remember.">auto</span>' : ""}${t.category_kind === "transfer" ? ' <button class="link which" title="Record it in the other account too, so both balances are right">Which account?</button>' : ""}`}</td>
           ${moneyCell(t.amount_cents)}
-          <td class="actions"><button class="link edit">Edit</button><button class="link danger del">Delete</button></td></tr>`).join("")
+          <td class="actions">${t.transfer_id ? "" : '<button class="link mk-transfer" title="Money moved to or from another of your accounts">Transfer…</button>'}<button class="link edit">Edit</button><button class="link danger del">Delete</button></td></tr>`).join("")
           : `<tr><td colspan="6" class="empty">No transactions match.</td></tr>`}</tbody></table></div>
     </div>`;
   const form = $("#filters");
@@ -481,6 +495,7 @@ pages.transactions = async (params) => {
   form.onchange = apply;
   form.onsubmit = (e) => { e.preventDefault(); apply(); };
   $("#clear").onclick = () => (location.hash = "transactions");
+  wireSpendAnalyzer(spend, f);
   const txSync = $("#tx-sync");
   if (txSync) txSync.onclick = () => syncBanks().catch(() => {});
   $("#add").onclick = () => editTransaction(null, { account_id: f.account_id }).then(route);
@@ -505,8 +520,17 @@ pages.transactions = async (params) => {
       if (await confirmDialog("Not a transfer? Both sides will become ordinary transactions you can categorize."))
         await attempt(() => api("POST", `/api/transactions/${t.id}/unlink-transfer`), "Split into two transactions").then(route);
     };
+    const mk = $(".mk-transfer", tr), which = $(".which", tr);
+    if (mk) mk.onclick = () => markTransfer(t).then((done) => done && route());
+    if (which) which.onclick = () => markTransfer(t).then((done) => done && route());
     const sel = $(".cat", tr);
     if (sel) sel.onchange = async () => {
+      const cat = store.categories.find((c) => String(c.id) === sel.value);
+      if (cat && cat.kind === "transfer" && t.category_kind !== "transfer") {
+        // Choosing "Transfer": ask where the money went, so the other balance is right too.
+        if (await markTransfer(t)) route(); else sel.value = t.category_id ?? "";
+        return;
+      }
       const r = await attempt(() => api("PUT", `/api/transactions/${t.id}`, { category_id: sel.value || null }));
       toast(r.similar_updated
         ? `Category updated, and applied to ${r.similar_updated} other ${r.similar_updated === 1 ? "transaction" : "transactions"} from the same merchant`
@@ -515,6 +539,160 @@ pages.transactions = async (params) => {
     };
   });
 };
+
+async function markTransfer(t) {
+  const others = store.accounts.filter((a) => a.id !== t.account_id);
+  const out = t.amount_cents < 0;
+  const v = await formDialog(`${out ? "Moved" : "Received"} ${money(Math.abs(t.amount_cents))} ${out ? "to" : "from"} another account`, [
+    { name: "account_id", label: out ? "Where did the money go?" : "Where did the money come from?", type: "select", wide: true,
+      options: others.map((a) => `<option value="${a.id}">${esc(a.name)}</option>`).join("") +
+        `<option value="">Not in FinOrganizer (just don't count it)</option>`,
+      hint: "Transfers between your own accounts aren't counted as spending or income. If the matching entry isn't in that account yet, it's added so both balances are right." },
+    { name: "remember", label: `Always treat "${t.payee}" in ${t.account_name} this way`, type: "checkbox", value: !!t.payee },
+  ], "Save");
+  if (!v) return false;
+  const r = await attempt(() => api("POST", `/api/transactions/${t.id}/transfer`,
+    { account_id: v.account_id ? Number(v.account_id) : null, remember: v.account_id ? v.remember : false }));
+  if (!r) return false;
+  toast(!r.account_name ? "Marked as a transfer; not counted as spending or income"
+    : `Recorded as a transfer ${out ? "to" : "from"} ${r.account_name}` + (r.created ? " (added the matching entry there)" : " (linked with the matching entry there)") +
+      (r.similar ? `, and ${r.similar} more like it` : ""));
+  await loadShared();
+  return true;
+}
+
+// ----------------------------------------------------------- spend analyzer
+
+const SLICES = 5;  // largest categories get their own slice; the rest share "Other"
+const sliceColor = (i) => (i < SLICES ? `var(--series-${i + 1})` : "var(--series-other)");
+
+function rangeChips(f) {
+  const today = todayISO(), m = thisMonth();
+  const end = (mon) => { const [y, mo] = mon.split("-").map(Number); return `${mon}-${String(new Date(y, mo, 0).getDate()).padStart(2, "0")}`; };
+  return [
+    ["All dates", "", ""],
+    ["This month", `${m}-01`, end(m)],
+    ["Last month", `${shiftMonth(m, -1)}-01`, end(shiftMonth(m, -1))],
+    ["Last 3 months", `${shiftMonth(m, -2)}-01`, today],
+    ["This year", `${m.slice(0, 4)}-01-01`, today],
+  ].map(([label, start, stop]) => ({ label, start, end: stop, active: (f.start || "") === start && (f.end || "") === stop }));
+}
+
+function donutPath(cx, cy, r0, r1, a0, a1) {
+  const pt = (r, a) => `${(cx + r * Math.sin(a)).toFixed(2)} ${(cy - r * Math.cos(a)).toFixed(2)}`;
+  const large = a1 - a0 > Math.PI ? 1 : 0;
+  return `M${pt(r1, a0)} A${r1} ${r1} 0 ${large} 1 ${pt(r1, a1)} L${pt(r0, a1)} A${r0} ${r0} 0 ${large} 0 ${pt(r0, a0)} Z`;
+}
+
+const pieKey = (c) => (c.category_id == null ? "none" : String(c.category_id));
+
+// The largest categories get a slice each; the rest share one "Other" slice.
+function pieSlices(cats) {
+  const top = cats.slice(0, cats.length > SLICES + 1 ? SLICES : SLICES + 1);
+  const rest = cats.slice(top.length);
+  const slices = top.map((c, i) => ({ ...c, key: pieKey(c), color: sliceColor(i) }));
+  if (rest.length) {
+    const spent = rest.reduce((s, c) => s + c.spent_cents, 0);
+    slices.push({ key: "other", category_name: `Other (${rest.length})`, spent_cents: spent, color: sliceColor(SLICES),
+      percent: rest.reduce((s, c) => s + c.percent, 0) });
+  }
+  return { top, rest, slices };
+}
+
+function spendAnalyzer(spend, f) {
+  const cats = spend.categories, total = spend.total_cents;
+  const range = rangeChips(f).find((c) => c.active);
+  const rangeLabel = range ? range.label.toLowerCase() : `${f.start || "…"} to ${f.end || "…"}`;
+  const acct = f.account_id ? store.accounts.find((a) => String(a.id) === String(f.account_id)) : null;
+  const head = `<div class="filters" style="margin-bottom:10px"><h2 style="margin:0 auto 0 0">Spending by category</h2>
+      <div class="chips">${rangeChips(f).map((c, i) => `<button type="button" class="chip${c.active ? " active" : ""}" data-range="${i}">${c.label}</button>`).join("")}</div>
+      <button class="link" id="chart-toggle">Hide</button></div>`;
+  if (!cats.length) return `<div class="card spend-card">${head}<p class="muted">No spending ${acct ? `in ${esc(acct.name)} ` : ""}for ${esc(rangeLabel)}.</p></div><div style="height:16px"></div>`;
+
+  const selKey = f.uncategorized ? "none" : f.category_id ? String(f.category_id) : null;
+  const keyOf = pieKey;
+  const { top, rest, slices } = pieSlices(cats);
+  const selInRest = selKey && rest.some((c) => keyOf(c) === selKey);
+  const activeSlice = selInRest ? "other" : selKey;
+
+  const size = 220, cx = size / 2, cy = size / 2, r1 = 104, r0 = 66;
+  let a = 0;
+  const arcs = slices.map((sl) => {
+    const sweep = (2 * Math.PI * sl.spent_cents) / total;
+    const a0 = a, a1 = a + sweep; a = a1;
+    // A single category is a full ring: draw it as two halves.
+    const d = sweep >= 2 * Math.PI - 1e-6
+      ? donutPath(cx, cy, r0, r1, 0, Math.PI) + donutPath(cx, cy, r0, r1, Math.PI, 2 * Math.PI - 1e-4)
+      : donutPath(cx, cy, r0, r1, a0, a1);
+    const dim = activeSlice && activeSlice !== sl.key;
+    return `<path class="slice${activeSlice === sl.key ? " selected" : ""}${dim ? " dim" : ""}" d="${d}" fill="${sl.color}" data-key="${sl.key}"
+      role="button" tabindex="-1" aria-label="${esc(sl.category_name)}: ${money(sl.spent_cents)}"></path>`;
+  }).join("");
+  const sel = selKey && cats.find((c) => keyOf(c) === selKey);
+  const center = sel
+    ? `<text x="${cx}" y="${cy - 4}" class="donut-value">${money(sel.spent_cents, { whole: true })}</text>
+       <text x="${cx}" y="${cy + 16}" class="donut-label">${esc(sel.category_name.length > 16 ? sel.category_name.slice(0, 15) + "…" : sel.category_name)}</text>`
+    : `<text x="${cx}" y="${cy - 4}" class="donut-value">${money(total, { whole: true })}</text>
+       <text x="${cx}" y="${cy + 16}" class="donut-label">spent</text>`;
+  const row = (c, color, extra = "") => `<button type="button" class="legend-row${keyOf(c) === selKey ? " selected" : ""}${extra}" data-key="${keyOf(c)}">
+      <span class="swatch" style="background:${color}"></span><span class="name">${esc(c.category_name)}</span>
+      <span class="num">${money(c.spent_cents)}</span><span class="pct muted small">${c.percent.toFixed(0)}%</span></button>`;
+  const otherOpen = selInRest || pref("txOtherOpen", "") === "1";
+  return `<div class="card spend-card">${head}
+    <div class="spend-grid">
+      <svg class="donut" viewBox="0 0 ${size} ${size}" width="${size}" height="${size}" role="img"
+        aria-label="Spending by category for ${esc(rangeLabel)}: ${esc(slices.map((s) => `${s.category_name} ${s.percent.toFixed(0)}%`).join(", "))}">${arcs}${center}</svg>
+      <div class="legend-list">
+        <div class="muted small" style="margin-bottom:4px">${esc(rangeLabel[0].toUpperCase() + rangeLabel.slice(1))}${acct ? ` · ${esc(acct.name)}` : ""} · transfers between your accounts not counted.
+          ${selKey ? '<button class="link" id="pie-clear">Show all categories</button>' : "Click a category to list its transactions."}</div>
+        ${top.map((c, i) => row(c, sliceColor(i))).join("")}
+        ${rest.length ? `<button type="button" class="legend-row other-toggle${activeSlice === "other" && !selKey ? " selected" : ""}" data-key="other" aria-expanded="${otherOpen}">
+            <span class="swatch" style="background:${sliceColor(SLICES)}"></span><span class="name">Other (${rest.length}) ${otherOpen ? "▴" : "▾"}</span>
+            <span class="num">${money(slices[slices.length - 1].spent_cents)}</span><span class="pct muted small">${slices[slices.length - 1].percent.toFixed(0)}%</span></button>
+          <div class="other-rows" ${otherOpen ? "" : "hidden"}>${rest.map((c) => row(c, sliceColor(SLICES), " sub")).join("")}</div>` : ""}
+      </div>
+    </div></div><div style="height:16px"></div>`;
+}
+
+function wireSpendAnalyzer(spend, f) {
+  const toggle = $("#chart-toggle");
+  if (toggle) toggle.onclick = () => { setPref("txChart", pref("txChart", "on") === "on" ? "off" : "on"); route(); };
+  if (!spend) return;
+  const go = (changes) => {
+    const p = new URLSearchParams(f);
+    for (const [k, v] of Object.entries(changes)) if (v) p.set(k, v); else p.delete(k);
+    location.hash = `transactions?${p}`;
+  };
+  const selKey = f.uncategorized ? "none" : f.category_id ? String(f.category_id) : null;
+  const pick = (key) => {
+    if (key === "other") {  // "Other" opens the list of the smaller categories
+      setPref("txOtherOpen", pref("txOtherOpen", "") === "1" ? "" : "1");
+      const box = $(".other-rows");
+      if (box) { box.hidden = !box.hidden; $(".other-toggle").setAttribute("aria-expanded", String(!box.hidden)); }
+      return;
+    }
+    if (key === selKey) go({ category_id: "", uncategorized: "" });  // click again: show everything
+    else if (key === "none") go({ category_id: "", uncategorized: "1" });
+    else go({ category_id: key, uncategorized: "" });
+  };
+  $$(".chip[data-range]").forEach((b) => (b.onclick = () => {
+    const c = rangeChips(f)[Number(b.dataset.range)];
+    go({ start: c.start, end: c.end });
+  }));
+  const clear = $("#pie-clear");
+  if (clear) clear.onclick = () => go({ category_id: "", uncategorized: "" });
+  $$(".legend-row").forEach((b) => (b.onclick = () => pick(b.dataset.key)));
+  const byKey = Object.fromEntries(pieSlices(spend.categories).slices.map((sl) => [sl.key, sl]));
+  $$(".donut .slice").forEach((p) => {
+    p.onclick = () => { hideTip(); pick(p.dataset.key); };
+    p.onmousemove = (e) => {
+      const sl = byKey[p.dataset.key];
+      showTip(`<strong>${esc(sl.category_name)}</strong><br>${money(sl.spent_cents)} · ${sl.percent.toFixed(0)}% of spending<br>
+        <span class="muted small">${sl.key === "other" ? "Click to list these categories" : "Click to list these transactions"}</span>`, e);
+    };
+    p.onmouseleave = hideTip;
+  });
+}
 
 // -------------------------------------------------------------------- accounts
 

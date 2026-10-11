@@ -19,7 +19,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from .categorize import Categorizer, enabled, recheck
+from .categorize import Categorizer, enabled, process_new
 from .db import row, rows
 from .ledger import NotFound, add_account, detect_transfers, get_account
 from .money import to_cents
@@ -357,10 +357,11 @@ def _import_transactions(conn, account_id, txns, categorizer):
         memo = (t.get("memo") or "").strip()
         if payee and t.get("description") and t["description"].strip() != payee and not memo:
             memo = t["description"].strip()
-        # Same transaction already typed in by hand? Attach the bank id instead of duplicating.
+        # Same transaction already typed in by hand (or added as the other side of a
+        # transfer)? Attach the bank id instead of duplicating.
         manual = conn.execute(
             """SELECT id FROM transactions WHERE account_id = ? AND external_id IS NULL
-               AND transfer_id IS NULL AND amount_cents = ? AND date BETWEEN ? AND ?
+               AND amount_cents = ? AND date BETWEEN ? AND ?
                ORDER BY ABS(julianday(date) - julianday(?)) LIMIT 1""",
             (account_id, amount, (date - dt.timedelta(days=MATCH_DAYS)).isoformat(),
              (date + dt.timedelta(days=MATCH_DAYS)).isoformat(), date.isoformat())).fetchone()
@@ -485,7 +486,7 @@ def sync_connection(conn, connection_id, today=None, _rerun=False):
         result["added_accounts"] += discovered
         result["errors"] += [e for e in more["errors"] if e not in result["errors"]]
     if result["imported"] and not _rerun:
-        recheck(conn)
+        result["transfers_linked"] = result.get("transfers_linked", 0) + process_new(conn)[1]
     return result
 
 
