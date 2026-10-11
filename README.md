@@ -168,6 +168,12 @@ SimpleFIN site) cuts off access.
 - Transfer check: a transfer should be listed in both accounts. Any found in only one are
   flagged (Transactions page and dashboard) with the likely match from your other accounts to
   link, or a button to add the missing side.
+- Investments: choose **Investment** (or **Investment withdrawal**) as the type of a
+  transaction. Money you invest isn't counted as spending; it's shown as invested on the
+  dashboard and Transactions page. Pick your investment or retirement account if it's in
+  FinOrganizer (its balance goes up too), or "Not in FinOrganizer" for a brokerage you don't
+  track here. Payments to common brokerages (Vanguard, Fidelity, Schwab, Robinhood, ...) are
+  categorized as Investments automatically.
 - Spending analyzer on the Transactions page: a pie chart of spending by category for the
   chosen dates and account. Click a slice (or its row) to list just that category.
 - Bank CSV import that detects common column layouts (amount, or debit/credit columns), supports

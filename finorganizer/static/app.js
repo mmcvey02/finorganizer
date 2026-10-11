@@ -118,7 +118,8 @@ function categoryOptions(selected, blank = "Uncategorized", kinds) {
 
 // --------------------------------------------------------------------- modal
 
-/* fields: [{name, label, type: text|number|money|date|select|textarea|checkbox, options(html), value, required}] */
+/* fields: [{name, label, type: text|number|money|date|select|textarea|checkbox, options(html), value, required,
+   showIf: (values) => bool}]; a field with showIf is only shown (and checked) while it returns true. */
 function formDialog(title, fields, submitLabel = "Save") {
   const dlg = $("#modal"), form = $("#modal-form");
   form.innerHTML = `<h2>${esc(title)}</h2>
@@ -129,16 +130,27 @@ function formDialog(title, fields, submitLabel = "Save") {
       let input;
       if (f.type === "select") input = `<select id="${id}" name="${f.name}" ${req}>${f.options}</select>`;
       else if (f.type === "textarea") input = `<textarea id="${id}" name="${f.name}" rows="6">${val}</textarea>`;
-      else if (f.type === "checkbox") return `<label class="check"><input type="checkbox" name="${f.name}" ${f.value ? "checked" : ""}> ${esc(f.label)}</label>`;
+      else if (f.type === "checkbox") return `<label class="check" data-field="${f.name}"><input type="checkbox" name="${f.name}" ${f.value ? "checked" : ""}> ${esc(f.label)}</label>`;
       else if (f.type === "file") input = `<input id="${id}" type="file" name="${f.name}" accept="${f.accept || ""}">`;
       else {
         const type = f.type === "money" ? "text" : (f.type || "text");
         const extra = f.type === "money" ? 'inputmode="decimal" placeholder="0.00"' : (f.type === "number" ? 'step="any"' : "");
         input = `<input id="${id}" name="${f.name}" type="${type}" value="${val}" ${extra} ${req} placeholder="${esc(f.placeholder || "")}">`;
       }
-      return `<label class="field" style="${f.wide ? "grid-column: 1 / -1" : ""}">${esc(f.label)}${input}${f.hint ? `<span class="muted small">${esc(f.hint)}</span>` : ""}</label>`;
+      return `<label class="field" data-field="${f.name}" style="${f.wide ? "grid-column: 1 / -1" : ""}">${esc(f.label)}${input}${f.hint ? `<span class="muted small">${esc(f.hint)}</span>` : ""}</label>`;
     }).join("")}</div>
     <div class="buttons"><button type="button" class="ghost" value="cancel">Cancel</button><button value="ok">${esc(submitLabel)}</button></div>`;
+  const conditional = fields.filter((f) => f.showIf);
+  const refresh = () => {
+    const values = Object.fromEntries(fields.map((f) => [f.name, form.elements[f.name] && form.elements[f.name].value]));
+    for (const f of conditional) {
+      const show = !!f.showIf(values);
+      const box = $(`[data-field="${f.name}"]`, form);
+      box.hidden = !show;
+      $$("input, select, textarea", box).forEach((el) => (el.disabled = !show));  // hidden fields aren't required
+    }
+  };
+  if (conditional.length) { form.onchange = refresh; refresh(); } else form.onchange = null;
   return new Promise((resolve) => {
     $("button[value=cancel]", form).onclick = () => { dlg.close(); };
     form.onsubmit = (e) => {
@@ -332,7 +344,7 @@ pages.dashboard = async (params) => {
         <div class="sub">${money(nw.assets_cents, { whole: true })} assets · ${money(nw.liabilities_cents, { whole: true })} debt</div></div>
       <div class="card tile"><div class="label">Income</div><div class="value">${money(s.income_cents, { whole: true })}</div><div class="sub">this month</div></div>
       <div class="card tile"><div class="label">Spending</div><div class="value">${money(s.expense_cents, { whole: true })}</div><div class="sub">${s.transaction_count} transactions</div></div>
-      <div class="card tile"><div class="label">Saved</div><div class="value ${s.net_cents < 0 ? "neg" : ""}">${money(s.net_cents, { whole: true })}</div><div class="sub">savings rate ${pct(s.savings_rate)}</div></div>
+      <div class="card tile"><div class="label">Saved</div><div class="value ${s.net_cents < 0 ? "neg" : ""}">${money(s.net_cents, { whole: true })}</div><div class="sub">savings rate ${pct(s.savings_rate)}${s.invested_cents > 0 ? ` · ${money(s.invested_cents, { whole: true })} invested` : ""}</div></div>
     </div>
     <div class="grid cols-2">
       <div class="card"><h2>Insights</h2>${d.insights.length ? d.insights.map((i) => `<div class="insight ${i.level}">
@@ -379,22 +391,57 @@ async function editTransaction(tx, defaults = {}) {
   const isNew = !tx;
   tx = tx || {};
   const amount = tx.amount_cents ?? null;
+  // Investing: neither spending nor income. Not offered when editing one side of a transfer.
+  const canInvest = !tx.transfer_id;
+  const investing = tx.category_kind === "investment";
+  const investAccounts = store.accounts.filter((a) => INVESTMENT_TYPES.includes(a.type));
+  const type = investing ? (amount > 0 ? "withdraw" : "invest") : amount > 0 ? "in" : "out";
+  const isInvest = (x) => x.type === "invest" || x.type === "withdraw";
   const v = await formDialog(isNew ? "New transaction" : "Edit transaction", [
-    { name: "type", label: "Type", type: "select", options:
-      `<option value="out" ${amount === null || amount < 0 ? "selected" : ""}>Expense (money out)</option>
-       <option value="in" ${amount > 0 ? "selected" : ""}>Income (money in)</option>` },
+    { name: "type", label: "Type", type: "select", options: [
+      ["out", "Expense (money out)"], ["in", "Income (money in)"],
+      ...(canInvest ? [["invest", "Investment (money invested)"], ["withdraw", "Investment withdrawal (money back)"]] : []),
+    ].map(([k, label]) => `<option value="${k}" ${k === type ? "selected" : ""}>${label}</option>`).join("") },
     { name: "amount", label: "Amount", type: "money", value: amount === null ? "" : dollars(Math.abs(amount)), required: true },
     { name: "date", label: "Date", type: "date", value: tx.date || todayISO(), required: true },
     { name: "account_id", label: "Account", type: "select", options: accountOptions(tx.account_id || defaults.account_id), required: true },
+    { name: "invest_account", label: "Investment account", type: "select", wide: true, showIf: isInvest,
+      options: investAccounts.map((a) => `<option value="${a.id}">${esc(a.name)}</option>`).join("") +
+        `<option value="" ${investAccounts.length ? "" : "selected"}>Not in FinOrganizer (e.g. a brokerage you don't track here)</option>`,
+      hint: "Investing isn't counted as spending or income; it's shown as invested. If the investment account is in FinOrganizer, its balance changes too." },
     { name: "payee", label: "Payee", value: tx.payee || "", wide: true },
-    { name: "category_id", label: "Category", type: "select", options: categoryOptions(tx.category_id), wide: true },
+    { name: "category_id", label: "Category", type: "select", options: categoryOptions(tx.category_id), wide: true, showIf: (x) => !isInvest(x) },
     { name: "memo", label: "Memo", value: tx.memo || "", wide: true },
     { name: "cleared", label: "Cleared / reconciled", type: "checkbox", value: !!tx.cleared },
   ]);
   if (!v) return;
-  const cents = Math.abs(toCents(v.amount)) * (v.type === "out" ? -1 : 1);
+  const out = v.type === "out" || v.type === "invest";
+  const cents = Math.abs(toCents(v.amount)) * (out ? -1 : 1);
   const body = { account_id: Number(v.account_id), date: v.date, amount_cents: cents, payee: v.payee,
                  category_id: v.category_id || null, memo: v.memo, cleared: v.cleared ? 1 : 0 };
+  if (isInvest(v)) {
+    const target = v.invest_account ? Number(v.invest_account) : null;
+    if (target === body.account_id) { toast("Choose the account the money comes from, not the investment account itself", true); return; }
+    let cat = store.categories.find((c) => c.kind === "investment");
+    if (!cat) {  // e.g. you already had your own "Investments" category for something else
+      const r = await attempt(() => api("POST", "/api/categories", { name: "Investing", kind: "investment", group_name: "Investing" }));
+      if (!r) return;
+      await loadShared();
+      cat = store.categories.find((c) => c.id === r.id);
+    }
+    body.category_id = cat.id;
+    const name = target ? store.accounts.find((a) => a.id === target).name : null;
+    const r = await attempt(async () => {
+      const id = isNew ? (await api("POST", "/api/transactions", body)).id
+        : (await api("PUT", `/api/transactions/${tx.id}`, body), tx.id);
+      // In FinOrganizer: record it in the investment account too (as a transfer).
+      if (target) await api("POST", `/api/transactions/${id}/transfer`, { account_id: target });
+      return true;
+    });
+    if (r) toast(`${v.type === "invest" ? "Investment" : "Withdrawal"} recorded${name ? ` (${v.type === "invest" ? "added to" : "taken from"} ${name})` : ""}`);
+    if (target) await loadShared();
+    return;
+  }
   if (isNew) await attempt(() => api("POST", "/api/transactions", body), "Transaction added");
   else {
     const r = await attempt(() => api("PUT", `/api/transactions/${tx.id}`, body));
@@ -434,6 +481,7 @@ async function importCSV(defaultAccount) {
 
 // Money moved between your own accounts: not spending or income.
 const isTransfer = (t) => !!t.transfer_id || t.category_kind === "transfer";
+const INVESTMENT_TYPES = ["investment", "retirement"];
 
 pages.transactions = async (params) => {
   const f = Object.fromEntries(params);
@@ -444,10 +492,15 @@ pages.transactions = async (params) => {
     showChart ? GET(`/api/reports/spending-by-category?${pieQ}`) : null,
     GET("/api/transfers/unmatched").catch(() => ({ missing: [], waiting: 0 }))]);
   const lonely = new Set(unmatched.missing.map((t) => t.id));
-  const counted = txs.filter((t) => !isTransfer(t));
+  const counted = txs.filter((t) => !isTransfer(t) && t.category_kind !== "investment");
+  // Invested: the Investments category, plus money moved into an investment account (counted on that side).
+  const typeOf = Object.fromEntries(store.accounts.map((a) => [a.name, a.type]));
+  const typeById = Object.fromEntries(store.accounts.map((a) => [a.id, a.type]));
+  const investedHere = txs.reduce((sum, t) => sum + (t.category_kind === "investment" && !t.transfer_id ? -t.amount_cents
+    : t.transfer_id && INVESTMENT_TYPES.includes(typeById[t.account_id]) && !INVESTMENT_TYPES.includes(typeOf[t.transfer_account_name]) ? t.amount_cents : 0), 0);
   const moneyIn = counted.reduce((s, t) => s + Math.max(0, t.amount_cents), 0);
   const moneyOut = counted.reduce((s, t) => s - Math.min(0, t.amount_cents), 0);
-  const transfers = txs.length - counted.length;
+  const transfers = txs.filter(isTransfer).length;
   const lastSync = conns.map((c) => c.last_sync).filter(Boolean).sort().pop();
   const syncErrors = conns.filter((c) => c.last_error);
   view.innerHTML = `
@@ -475,7 +528,7 @@ pages.transactions = async (params) => {
         <button class="ghost" type="button" id="clear">Clear</button>
       </form>
       <div class="muted small" style="margin-bottom:6px">${txs.length}${txs.length === 500 ? "+" : ""} transaction${txs.length === 1 ? "" : "s"} ·
-        money in ${money(moneyIn)} · money out ${money(moneyOut)}${transfers ? ` · ${transfers} transfer${transfers === 1 ? "" : "s"} between your accounts not counted` : ""}</div>
+        money in ${money(moneyIn)} · money out ${money(moneyOut)}${investedHere ? ` · ${investedHere > 0 ? "invested" : "withdrawn from investments"} ${money(Math.abs(investedHere))}` : ""}${transfers ? ` · ${transfers} transfer${transfers === 1 ? "" : "s"} between your accounts not counted` : ""}</div>
       <div class="table-wrap"><table>
         <thead><tr><th>Date</th><th>Payee</th><th class="hide-sm">Account</th><th>Category</th><th class="num">Amount</th><th></th></tr></thead>
         <tbody>${txs.length ? txs.map((t) => `<tr data-id="${t.id}">

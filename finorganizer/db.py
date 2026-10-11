@@ -43,7 +43,10 @@ ACCOUNT_TYPES = (
 # Account types whose balance is normally negative (money owed).
 LIABILITY_TYPES = ("credit_card", "loan", "mortgage")
 
-CATEGORY_KINDS = ("income", "expense", "transfer")
+# "investment": money put into (or taken back out of) investments that aren't tracked as an
+# account here. Like transfers, it's neither spending nor income; reports show it as invested.
+CATEGORY_KINDS = ("income", "expense", "transfer", "investment")
+INVESTMENT_ACCOUNT_TYPES = ("investment", "retirement")
 
 FREQUENCIES = ("weekly", "biweekly", "monthly", "quarterly", "yearly")
 
@@ -181,6 +184,13 @@ DEFAULT_CATEGORIES = [
     ("Fees & Charges", "expense", "Other"),
     ("Miscellaneous", "expense", "Other"),
     ("Transfer", "transfer", "Transfers"),
+    ("Investments", "investment", "Investing"),
+]
+
+# Default categories added in later versions, put into existing databases once (so one
+# you delete stays deleted).
+ADDED_CATEGORIES = [
+    ("cat_investments_v1", ("Investments", "investment", "Investing")),
 ]
 
 
@@ -206,6 +216,12 @@ def init_schema(conn):
             "INSERT INTO categories (name, kind, group_name) VALUES (?, ?, ?)",
             DEFAULT_CATEGORIES,
         )
+        conn.executemany("INSERT OR IGNORE INTO settings (key, value) VALUES (?, '1')",
+                         [(key,) for key, _ in ADDED_CATEGORIES])
+    for key, category in ADDED_CATEGORIES:
+        if not conn.execute("SELECT 1 FROM settings WHERE key = ?", (key,)).fetchone():
+            conn.execute("INSERT OR IGNORE INTO categories (name, kind, group_name) VALUES (?, ?, ?)", category)
+            conn.execute("INSERT INTO settings (key, value) VALUES (?, '1')", (key,))
     conn.commit()
 
 

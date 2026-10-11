@@ -58,6 +58,11 @@ RULES = [
     ("Salary", "in", ["payroll", "salary", "direct dep", "direct deposit", "paycheck", "wages", "adp", "gusto", "paychex"]),
     ("Interest & Dividends", "in", ["interest paid", "interest earned", "interest payment", "dividend", "div", "int pymt"]),
     ("Bonus", "in", ["bonus"]),
+    # Either direction: money put into a brokerage, or taken back out.
+    ("Investments", "any", ["vanguard", "fidelity", "schwab", "charles schwab", "robinhood", "betterment",
+                            "wealthfront", "etrade", "e trade", "td ameritrade", "ameritrade", "merrill edge",
+                            "acorns", "stash invest", "m1 finance", "webull", "interactive brokers", "ibkr",
+                            "brokerage", "investment", "investments", "invest"]),
     ("Rent / Mortgage", "out", ["rent", "mortgage", "apartments", "apartment", "property management", "property mgmt", "leasing", "hoa", "home loan"]),
     ("Utilities", "out", ["electric", "electricity", "power", "energy", "water", "sewer", "utility", "utilities", "pg&e", "pge", "con ed", "coned", "duke energy", "dominion", "edison", "national grid", "xcel", "gas co", "natural gas", "trash", "waste management"]),
     ("Phone & Internet", "out", ["verizon", "at&t", "att", "t mobile", "tmobile", "comcast", "xfinity", "spectrum", "cox", "centurylink", "frontier", "optimum", "mint mobile", "cricket", "boost mobile", "google fi", "starlink", "internet", "wireless"]),
@@ -128,7 +133,7 @@ class Categorizer:
             return amount_cents > 0
         if kind == "expense":
             return amount_cents < 0 or amount_cents == 0
-        return False
+        return kind == "investment"  # money goes both ways
 
     def guess(self, payee, memo="", amount_cents=0):
         """Best category id for this transaction, or None if there's no confident match."""

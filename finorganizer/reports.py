@@ -1,15 +1,32 @@
 """Read-only analysis over the ledger: summaries, trends, net worth, insights.
 
-Transfers between your own accounts are excluded from income/expense figures.
+Transfers between your own accounts, and money put into investments, are excluded from
+income/expense figures; investing is reported separately.
 """
 
-from .db import LIABILITY_TYPES, rows
+from .db import INVESTMENT_ACCOUNT_TYPES, LIABILITY_TYPES, rows
 from .ledger import budget_status, list_accounts, list_goals, unmatched_transfers, upcoming
 from .money import fmt, month_bounds, month_of, months_between, shift_month, today
 
-# Income = positive non-transfer flows; expenses = negative non-transfer flows.
-# Uncategorised transactions count by sign.
-_NOT_TRANSFER = "t.transfer_id IS NULL AND COALESCE(c.kind, '') != 'transfer'"
+# Income = positive everyday flows; expenses = negative everyday flows. Transfers and
+# investing are neither. Uncategorised transactions count by sign.
+_NOT_TRANSFER = "t.transfer_id IS NULL AND COALESCE(c.kind, '') NOT IN ('transfer', 'investment')"
+_INVESTMENT_TYPES = "(%s)" % ", ".join("'%s'" % t for t in INVESTMENT_ACCOUNT_TYPES)
+
+
+def invested(conn, start, end):
+    """Money put into investments minus money taken out: in the Investments category, or
+    moved into an investment/retirement account from one of your other accounts."""
+    outside = conn.execute(
+        "SELECT COALESCE(-SUM(t.amount_cents), 0) FROM transactions t JOIN categories c ON c.id = t.category_id"
+        " WHERE t.date BETWEEN ? AND ? AND t.transfer_id IS NULL AND c.kind = 'investment'", (start, end)).fetchone()[0]
+    moved = conn.execute(
+        "SELECT COALESCE(SUM(t.amount_cents), 0) FROM transactions t"
+        " JOIN accounts a ON a.id = t.account_id JOIN transactions o ON o.id = t.transfer_id"
+        " JOIN accounts oa ON oa.id = o.account_id"
+        " WHERE t.date BETWEEN ? AND ? AND a.type IN " + _INVESTMENT_TYPES +
+        " AND oa.type NOT IN " + _INVESTMENT_TYPES, (start, end)).fetchone()[0]
+    return outside + moved
 
 
 def period_summary(conn, start, end):
@@ -28,6 +45,7 @@ def period_summary(conn, start, end):
         "income_cents": income, "expense_cents": expenses, "net_cents": net,
         "savings_rate": round(100 * net / income, 1) if income else None,
         "transaction_count": count,
+        "invested_cents": invested(conn, start, end),
     }
 
 
@@ -147,6 +165,9 @@ def insights(conn, month=None):
             notes.append(("info", "Savings rate is %.0f%% this month; 15-20%% is a common target." % rate))
         else:
             notes.append(("good", "You're saving %.0f%% of your income this month." % rate))
+
+    if cur["invested_cents"] > 0:
+        notes.append(("good", "You invested %s this month." % fmt(cur["invested_cents"])))
 
     if prev["expense_cents"] and cur["expense_cents"] > prev["expense_cents"] * 1.2:
         notes.append(("info", "Spending is up %.0f%% compared with last month."
