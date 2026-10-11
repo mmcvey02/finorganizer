@@ -165,6 +165,9 @@ SimpleFIN site) cuts off access.
   "Transfer to Savings" with only one side known goes in the Transfer category. For anything
   else, **Transfer…** on a transaction records it in the other account too (both balances stay
   right) and can remember the payee for next time.
+- Transfer check: a transfer should be listed in both accounts. Any found in only one are
+  flagged (Transactions page and dashboard) with the likely match from your other accounts to
+  link, or a button to add the missing side.
 - Spending analyzer on the Transactions page: a pie chart of spending by category for the
   chosen dates and account. Click a slice (or its row) to list just that category.
 - Bank CSV import that detects common column layouts (amount, or debit/credit columns), supports

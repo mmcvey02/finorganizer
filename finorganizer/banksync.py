@@ -21,7 +21,7 @@ import urllib.request
 
 from .categorize import Categorizer, enabled, process_new
 from .db import row, rows
-from .ledger import NotFound, add_account, detect_transfers, get_account
+from .ledger import NotFound, add_account, get_account, reconcile_transfers
 from .money import to_cents
 from . import __version__
 from .net import describe_ssl_error, ssl_context
@@ -187,10 +187,26 @@ def list_connections(conn):
     return out
 
 
+def _balance(a):
+    """The account's balance in cents, or None if the bank sent none (or nonsense)."""
+    try:
+        return to_cents(a["balance"]) if a.get("balance") not in (None, "") else None
+    except ValueError:
+        return None
+
+
+def _balance_date(a):
+    try:
+        return _ts_date(a["balance-date"]).isoformat() if a.get("balance-date") else None
+    except (TypeError, ValueError, OverflowError, OSError):
+        return None
+
+
 def _upsert_remote(conn, connection_id, accounts):
     for a in accounts:
+        if a.get("id") in (None, ""):
+            continue  # can't be told apart from other accounts; nothing to link it to
         org = a.get("org") or {}
-        bal = a.get("balance")
         conn.execute(
             """INSERT INTO remote_accounts (connection_id, remote_id, name, institution, currency,
                                             balance_cents, balance_date)
@@ -201,8 +217,7 @@ def _upsert_remote(conn, connection_id, accounts):
                    balance_date = excluded.balance_date""",
             (connection_id, str(a["id"]), a.get("name") or "Account",
              org.get("name") or org.get("domain") or "", a.get("currency") or "USD",
-             to_cents(bal) if bal not in (None, "") else None,
-             _ts_date(a["balance-date"]).isoformat() if a.get("balance-date") else None))
+             _balance(a), _balance_date(a)))
     conn.commit()
 
 
@@ -342,17 +357,23 @@ def _windows(start, end):
         cur = nxt
 
 
-def _import_transactions(conn, account_id, txns, categorizer):
-    imported = matched = 0
+def _import_transactions(conn, account_id, txns, categorizer, errors=None):
+    """Add the bank's posted transactions to an account. Items the bank sent in a form
+    we can't read are skipped (and reported in ``errors``) rather than stopping the sync."""
+    imported = matched = skipped = 0
     for t in txns:
         if t.get("pending"):
             continue  # pending items change id/amount when they post; take them once posted
-        ext = str(t["id"])
+        try:
+            ext = str(t["id"])
+            date = _ts_date(t.get("posted") or t.get("transacted_at"))
+            amount = to_cents(t["amount"])
+        except (KeyError, TypeError, ValueError, OverflowError, OSError):
+            skipped += 1
+            continue
         if conn.execute("SELECT 1 FROM transactions WHERE account_id = ? AND external_id = ?",
                         (account_id, ext)).fetchone():
             continue
-        date = _ts_date(t.get("posted") or t.get("transacted_at"))
-        amount = to_cents(t["amount"])
         payee = (t.get("payee") or t.get("description") or "").strip()
         memo = (t.get("memo") or "").strip()
         if payee and t.get("description") and t["description"].strip() != payee and not memo:
@@ -377,6 +398,10 @@ def _import_transactions(conn, account_id, txns, categorizer):
             (account_id, date.isoformat(), amount, payee, category_id, memo, ext,
              int(category_id is not None)))
         imported += 1
+    if skipped and errors is not None:
+        msg = "skipped %d transaction%s the bank sent in an unreadable form" % (skipped, "" if skipped == 1 else "s")
+        if msg not in errors:
+            errors.append(msg)
     return imported, matched
 
 
@@ -440,7 +465,8 @@ def sync_connection(conn, connection_id, today=None, _rerun=False):
             accounts = payload.get("accounts") or []
             _upsert_remote(conn, connection_id, accounts)
             for a in accounts:
-                remote_by_id.setdefault(str(a["id"]), []).extend(a.get("transactions") or [])
+                if a.get("id") not in (None, ""):
+                    remote_by_id.setdefault(str(a["id"]), []).extend(a.get("transactions") or [])
         # Bank accounts that appeared for the first time in this download.
         before = {r["id"] for r in rows(conn.execute(
             "SELECT id FROM remote_accounts WHERE connection_id = ? AND account_id IS NOT NULL",
@@ -452,7 +478,8 @@ def sync_connection(conn, connection_id, today=None, _rerun=False):
                 continue
             if r["id"] not in before:
                 continue  # just discovered: the follow-up pass fetches its full history
-            imp, mat = _import_transactions(conn, r["account_id"], remote_by_id.get(r["remote_id"], []), categorizer)
+            imp, mat = _import_transactions(conn, r["account_id"], remote_by_id.get(r["remote_id"], []),
+                                            categorizer, result["errors"])
             result["imported"] += imp
             result["matched"] += mat
             _take_flag(conn, "backfill", r["account_id"])
@@ -468,7 +495,7 @@ def sync_connection(conn, connection_id, today=None, _rerun=False):
                       "; ".join(result["errors"]) or None, connection_id))
         conn.commit()
         # Payments between your own linked accounts arrive twice; pair them up as transfers.
-        result["transfers_linked"] = detect_transfers(conn)
+        result["transfers_linked"] = reconcile_transfers(conn)
     except SyncError as e:
         conn.rollback()
         if e.status in (401, 403):

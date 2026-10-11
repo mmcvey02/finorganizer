@@ -4,7 +4,7 @@ Transfers between your own accounts are excluded from income/expense figures.
 """
 
 from .db import LIABILITY_TYPES, rows
-from .ledger import budget_status, list_accounts, list_goals, upcoming
+from .ledger import budget_status, list_accounts, list_goals, unmatched_transfers, upcoming
 from .money import fmt, month_bounds, month_of, months_between, shift_month, today
 
 # Income = positive non-transfer flows; expenses = negative non-transfer flows.
@@ -172,6 +172,12 @@ def insights(conn, month=None):
     for a in high_interest:
         notes.append(("warning", "%s carries %s at %.1f%% APR; paying it down is a guaranteed return."
                       % (a["name"], fmt(-a["balance_cents"]), a["interest_rate"])))
+
+    unmatched = len(unmatched_transfers(conn)["missing"])
+    if unmatched:
+        notes.append(("warning", "%d transfer%s between your accounts appear%s in only one account; "
+                      "review them on the Transactions page." % (unmatched, "" if unmatched == 1 else "s",
+                                                                  "s" if unmatched == 1 else "")))
 
     uncategorized = conn.execute(
         "SELECT COUNT(*) FROM transactions WHERE category_id IS NULL AND date BETWEEN ? AND ?",

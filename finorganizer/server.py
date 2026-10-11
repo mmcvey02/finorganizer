@@ -5,11 +5,13 @@ Uses only the standard library. Money in the API is always integer cents.
 
 import base64
 import json
+import math
 import mimetypes
 import os
 import re
 import sqlite3
 import threading
+import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
@@ -43,9 +45,12 @@ def _num(body, key, default=None):
     if v is None:
         raise HTTPError(400, "%s is required" % key)
     try:
-        return float(v)
+        v = float(v)
     except (TypeError, ValueError):
         raise HTTPError(400, "%s must be a number" % key)
+    if not math.isfinite(v):
+        raise HTTPError(400, "%s must be a number" % key)
+    return v
 
 
 class Router:
@@ -141,11 +146,13 @@ def build_router(app=None):
     def make_transfer(c, q, b, i):
         other = _opt_int(b.get("account_id"))
         if other is None:  # the other account isn't tracked here: just don't count it
-            L.update_transaction(c, i, category_id=L.find_category(c, "Transfer", create_kind="transfer")["id"])
+            L.mark_outside_transfer(c, i)
             return {"created": False, "similar": 0, "account_name": None}
         return L.make_transfer(c, i, other, bool(b.get("remember")))
 
     r.add("POST", r"/api/transactions/(\d+)/transfer", make_transfer)
+    r.add("POST", r"/api/transactions/(\d+)/link", lambda c, q, b, i: L.link_pair(c, i, _int(b.get("other_id"), "other_id")))
+    r.add("GET", "/api/transfers/unmatched", lambda c, q, b: L.unmatched_transfers(c))
     r.add("POST", "/api/transfers", lambda c, q, b: {"ids": L.add_transfer(
         c, _int(b.get("from_account_id")), _int(b.get("to_account_id")), b.get("date") or today(),
         _int(b.get("amount_cents")), b.get("memo", ""))})
@@ -258,10 +265,14 @@ def build_router(app=None):
         return {"id": pid}
 
     def delete_profile(c, q, b, pid):
-        pid = str(pid)
+        profiles, pid = need_profiles(), str(pid)
+        if pid == DEFAULT_ID:
+            raise HTTPError(400, "the default profile can't be deleted")
+        if not profiles.exists(pid):
+            raise HTTPError(404, "profile %r not found" % pid)
         if pid == app.profile_id:
             app.switch(DEFAULT_ID)  # close it first; Windows can't delete an open file
-        need_profiles().delete(pid)
+        profiles.delete(pid)
 
     r.add("GET", "/api/profiles", list_profiles)
     r.add("POST", "/api/profiles", create_profile)
@@ -350,6 +361,9 @@ class App:
             except (ValueError, TypeError) as e:
                 self.conn.rollback()
                 raise HTTPError(400, str(e))
+            except ArithmeticError:  # e.g. a calculator asked about absurdly large numbers
+                self.conn.rollback()
+                raise HTTPError(400, "those numbers are too large to calculate with")
 
 
 def respond(app, method, path, query_string="", raw_body=b""):
@@ -401,6 +415,13 @@ def respond(app, method, path, query_string="", raw_body=b""):
         return 200, json_type, json.dumps({"ok": True} if result is None else result).encode(), {}
     except HTTPError as e:
         return e.status, json_type, json.dumps({"error": str(e)}).encode(), {}
+    except Exception as e:  # a bug: report it instead of dropping the connection
+        traceback.print_exc()
+        try:
+            app.conn.rollback()
+        except sqlite3.Error:
+            pass
+        return 500, json_type, json.dumps({"error": "something went wrong (%s: %s)" % (type(e).__name__, e)}).encode(), {}
 
 
 def backup_filename(app):

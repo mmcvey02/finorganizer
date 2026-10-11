@@ -639,8 +639,10 @@ def main(argv=None):
         sys.exit("error: %s" % e)
     try:
         args.fn(conn, args)
-    except (ValueError, LookupError, sqlite3.Error, SyncError) as e:
+    except (ValueError, LookupError, ArithmeticError, sqlite3.Error, SyncError) as e:
         sys.exit("error: %s" % e)
+    except BrokenPipeError:  # output piped into e.g. `head`, which stopped reading
+        sys.stderr.close()
     finally:
         conn.close()
 

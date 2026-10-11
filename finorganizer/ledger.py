@@ -2,6 +2,8 @@
 goals and recurring items. Every function takes an open sqlite3 connection.
 """
 
+import datetime as dt
+import math
 import re
 
 from .db import ACCOUNT_TYPES, CATEGORY_KINDS, FREQUENCIES, row, rows
@@ -23,6 +25,42 @@ def _require_name(value, what="name"):
     if not value:
         raise ValueError("%s can't be blank" % what)
     return value
+
+
+def _as_int(value, what):
+    """A whole number from JSON/form input; refuses text, fractions and true/false."""
+    if isinstance(value, bool):
+        raise ValueError("%s must be a whole number" % what)
+    if isinstance(value, float):
+        if not value.is_integer():
+            raise ValueError("%s must be a whole number" % what)
+        return int(value)
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        raise ValueError("%s must be a whole number" % what)
+
+
+def _coerce(fields, ints=(), opt_ints=(), floats=(), flags=()):
+    """Check and convert the types of fields passed to the update_* functions, so bad
+    input is refused instead of being stored as text in a number column."""
+    for k in ints:
+        if k in fields:
+            fields[k] = _as_int(fields[k], k)
+    for k in opt_ints:
+        if k in fields:
+            fields[k] = None if fields[k] in (None, "") else _as_int(fields[k], k)
+    for k in floats:
+        if k in fields:
+            try:
+                fields[k] = float(fields[k])
+            except (TypeError, ValueError):
+                raise ValueError("%s must be a number" % k)
+            if not math.isfinite(fields[k]):
+                raise ValueError("%s must be a number" % k)
+    for k in flags:
+        if k in fields:
+            fields[k] = int(bool(fields[k]))
 
 
 def _update(conn, table, item_id, fields, allowed):
@@ -94,6 +132,7 @@ def find_account(conn, ref):
 
 
 def update_account(conn, account_id, **fields):
+    _coerce(fields, ints=("opening_balance_cents",), floats=("interest_rate",), flags=("archived",))
     if "name" in fields:
         fields["name"] = _require_name(fields["name"], "account name")
     if "type" in fields and fields["type"] not in ACCOUNT_TYPES:
@@ -103,6 +142,9 @@ def update_account(conn, account_id, **fields):
 
 
 def delete_account(conn, account_id):
+    # A bank account that fed it stops importing; otherwise the next sync would
+    # quietly create the account again.
+    conn.execute("UPDATE remote_accounts SET ignored = 1 WHERE account_id = ?", (account_id,))
     cur = conn.execute("DELETE FROM accounts WHERE id = ?", (account_id,))
     conn.commit()
     if cur.rowcount == 0:
@@ -141,6 +183,8 @@ def update_category(conn, category_id, **fields):
 
 
 def delete_category(conn, category_id):
+    # Its transactions become uncategorized; they're no longer "auto" guesses either.
+    conn.execute("UPDATE transactions SET auto_category = 0 WHERE category_id = ?", (category_id,))
     cur = conn.execute("DELETE FROM categories WHERE id = ?", (category_id,))
     conn.commit()
     if cur.rowcount == 0:
@@ -250,9 +294,16 @@ def get_transaction(conn, tx_id):
 
 
 def update_transaction(conn, tx_id, **fields):
+    _coerce(fields, ints=("account_id", "amount_cents"), opt_ints=("category_id",), flags=("cleared",))
     if "date" in fields:
         fields["date"] = parse_date(fields["date"]).isoformat()
     tx = get_transaction(conn, tx_id)
+    if tx["transfer_id"]:
+        other = get_transaction(conn, tx["transfer_id"])
+        if fields.get("account_id") == other["account_id"]:
+            raise ValueError("both sides of a transfer can't be in the same account")
+        if fields.get("amount_cents") == 0:
+            raise ValueError("a transfer can't be for $0")
     if "category_id" in fields:
         fields["auto_category"] = 0  # chosen (or confirmed) by you
     _update(conn, "transactions", tx_id, fields,
@@ -269,11 +320,17 @@ def update_transaction(conn, tx_id, **fields):
             _update(conn, "transactions", tx["transfer_id"], mirror, set(mirror))
 
 
-TRANSFER_MATCH_DAYS = 4
+# Money moved between banks can take a few business days to show up on the other side.
+TRANSFER_MATCH_DAYS = 5
 
 
 def _pair_key(a, b):
     return "not_transfer:%d-%d" % (min(a, b), max(a, b))
+
+
+def _rejected_pairs(conn):
+    """Pairs you split apart ("Not a transfer"): never linked again automatically."""
+    return {r[0] for r in conn.execute("SELECT key FROM settings WHERE key LIKE 'not_transfer:%'")}
 
 
 def link_transfer(conn, out_id, in_id):
@@ -325,7 +382,7 @@ def detect_transfers(conn):
         " c.kind AS kind FROM transactions t LEFT JOIN categories c ON c.id = t.category_id"
         " WHERE t.transfer_id IS NULL AND t.amount_cents != 0"
         " AND (t.category_id IS NULL OR COALESCE(t.auto_category, 0) = 1 OR c.kind = 'transfer')"))
-    rejected = {r[0] for r in conn.execute("SELECT key FROM settings WHERE key LIKE 'not_transfer:%'")}
+    rejected = _rejected_pairs(conn)
     by_amount = {}
     for t in cands:
         t["says_transfer"] = t["kind"] == "transfer" or looks_like_transfer(t["payee"], t["memo"])
@@ -387,12 +444,12 @@ def _link_or_create(conn, tx, other):
     """Link ``tx`` with its counterpart in account ``other``, adding one if needed.
     Returns True if a counterpart was added."""
     d = parse_date(tx["date"])
+    rejected = _rejected_pairs(conn)
     near = [o for o in rows(conn.execute(
-        "SELECT t.id, t.date FROM transactions t LEFT JOIN categories c ON c.id = t.category_id"
-        " WHERE t.account_id = ? AND t.amount_cents = ? AND t.transfer_id IS NULL",
+        "SELECT id, date FROM transactions WHERE account_id = ? AND amount_cents = ? AND transfer_id IS NULL",
         (other["id"], -tx["amount_cents"])))
         if abs((parse_date(o["date"]) - d).days) <= TRANSFER_MATCH_DAYS
-        and not row(conn.execute("SELECT 1 FROM settings WHERE key = ?", (_pair_key(tx["id"], o["id"]),)))]
+        and _pair_key(tx["id"], o["id"]) not in rejected]
     if near:
         partner = min(near, key=lambda o: abs((parse_date(o["date"]) - d).days))["id"]
         created = False
@@ -442,7 +499,89 @@ def apply_transfer_rules(conn):
 def reconcile_transfers(conn):
     """Everything that turns money moving between your accounts into transfers; run
     after new transactions arrive. Returns how many transfers were made."""
+    repair_transfers(conn)
     return detect_transfers(conn) + apply_transfer_rules(conn)
+
+
+def repair_transfers(conn):
+    """Make sure every transfer link holds together: both sides point at each other,
+    are in different accounts and have opposite amounts. A link that doesn't (left by
+    an older version or an edit) is restored when possible, otherwise dropped so the
+    transaction shows up as a transfer missing its other side. Returns links fixed."""
+    fixed = 0
+    for t in rows(conn.execute(
+            "SELECT t.id, t.account_id, t.amount_cents, o.id AS oid, o.account_id AS o_account,"
+            " o.amount_cents AS o_amount, o.transfer_id AS o_transfer FROM transactions t"
+            " LEFT JOIN transactions o ON o.id = t.transfer_id WHERE t.transfer_id IS NOT NULL")):
+        sound = (t["oid"] is not None and t["o_account"] != t["account_id"]
+                 and t["o_amount"] == -t["amount_cents"])
+        if sound and t["o_transfer"] == t["id"]:
+            continue
+        if sound and t["o_transfer"] is None:
+            conn.execute("UPDATE transactions SET transfer_id = ? WHERE id = ?", (t["id"], t["oid"]))
+        else:
+            conn.execute("UPDATE transactions SET transfer_id = NULL WHERE id = ?", (t["id"],))
+        fixed += 1
+    conn.commit()
+    return fixed
+
+
+def unmatched_transfers(conn, as_of=None):
+    """Transfers that show up in only one of your accounts.
+
+    A transfer between your own accounts should be listed twice: money out of one and
+    into the other. This looks at every transaction in the Transfer category that
+    isn't paired, and checks each of your other accounts for the matching transaction
+    (opposite amount, within ``2 * TRANSFER_MATCH_DAYS`` days). Ones from the last
+    few days are only counted as "waiting", since the other bank may not have posted
+    its side yet; ones you said involve an account that isn't in FinOrganizer are
+    skipped. Returns {"missing": [transaction + "matches"], "waiting": n}.
+    """
+    as_of = parse_date(as_of or today())
+    cutoff = as_of - dt.timedelta(days=TRANSFER_MATCH_DAYS)
+    outside = {r[0] for r in conn.execute("SELECT key FROM settings WHERE key LIKE 'transfer_external:%'")}
+    rejected = _rejected_pairs(conn)
+    missing, waiting = [], 0
+    for t in rows(conn.execute(TX_SELECT + " WHERE t.transfer_id IS NULL AND c.kind = 'transfer'"
+                               " AND t.amount_cents != 0 ORDER BY t.date DESC, t.id DESC")):
+        if "transfer_external:%d" % t["id"] in outside:
+            continue
+        d = parse_date(t["date"])
+        if d > cutoff:
+            waiting += 1
+            continue
+        window = dt.timedelta(days=2 * TRANSFER_MATCH_DAYS)
+        t["matches"] = [m for m in rows(conn.execute(
+            TX_SELECT + " WHERE t.transfer_id IS NULL AND t.account_id != ? AND t.amount_cents = ?"
+            " AND t.date BETWEEN ? AND ? ORDER BY ABS(julianday(t.date) - julianday(?)), t.id",
+            (t["account_id"], -t["amount_cents"], (d - window).isoformat(), (d + window).isoformat(),
+             d.isoformat()))) if _pair_key(t["id"], m["id"]) not in rejected][:5]
+        missing.append(t)
+    return {"missing": missing, "waiting": waiting}
+
+
+def link_pair(conn, tx_id, other_id):
+    """Link two transactions you picked as the two sides of one transfer."""
+    a, b = get_transaction(conn, tx_id), get_transaction(conn, other_id)
+    if a["transfer_id"] or b["transfer_id"]:
+        raise ValueError("one of those is already part of a transfer")
+    if a["account_id"] == b["account_id"]:
+        raise ValueError("both sides of a transfer can't be in the same account")
+    if a["amount_cents"] != -b["amount_cents"] or a["amount_cents"] == 0:
+        raise ValueError("the two sides of a transfer must be the same amount, one in and one out")
+    out_id, in_id = (a["id"], b["id"]) if a["amount_cents"] < 0 else (b["id"], a["id"])
+    link_transfer(conn, out_id, in_id)
+    conn.execute("DELETE FROM settings WHERE key IN (?, ?, ?)",
+                 (_pair_key(a["id"], b["id"]), "not_transfer_tx:%d" % a["id"], "not_transfer_tx:%d" % b["id"]))
+    conn.commit()
+
+
+def mark_outside_transfer(conn, tx_id):
+    """Money moved to or from an account that isn't in FinOrganizer: not spending or
+    income, and nothing to look for in your other accounts."""
+    update_transaction(conn, tx_id, category_id=find_category(conn, "Transfer", create_kind="transfer")["id"])
+    conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, '1')", ("transfer_external:%d" % tx_id,))
+    conn.commit()
 
 
 def delete_transaction(conn, tx_id):
@@ -563,13 +702,14 @@ def contribute_goal(conn, goal_id, amount_cents):
 
 
 def update_goal(conn, goal_id, **fields):
+    _coerce(fields, ints=("target_cents", "saved_cents"), opt_ints=("account_id",))
+    if fields.get("target_cents", 1) <= 0:
+        raise ValueError("goal target must be positive")
     if "name" in fields:
         fields["name"] = _require_name(fields["name"], "goal name")
     if "target_date" in fields:
         fields["target_date"] = (parse_date(fields["target_date"]).isoformat()
                                  if fields["target_date"] else None)
-    if "account_id" in fields and fields["account_id"] in ("", None):
-        fields["account_id"] = None
     _update(conn, "goals", goal_id, fields,
             {"name", "target_cents", "target_date", "account_id", "saved_cents", "notes"})
 
@@ -610,6 +750,7 @@ def list_recurring(conn, include_inactive=True):
 
 
 def update_recurring(conn, rec_id, **fields):
+    _coerce(fields, ints=("account_id", "amount_cents"), opt_ints=("category_id",), flags=("active",))
     if "frequency" in fields and fields["frequency"] not in FREQUENCIES:
         raise ValueError("invalid frequency")
     if "name" in fields:
@@ -634,7 +775,6 @@ def delete_recurring(conn, rec_id):
 
 def upcoming(conn, days=30, as_of=None):
     """Expand active recurring items into individual occurrences in the next ``days``."""
-    import datetime as dt
     start = parse_date(as_of or today())
     end = start + dt.timedelta(days=days)
     out = []

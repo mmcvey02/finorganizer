@@ -6,12 +6,24 @@ Rates are annual percentages (e.g. 6.5 means 6.5% APR).
 import math
 
 MAX_MONTHS = 1200  # 100 years: guard against plans that never finish
+MAX_YEARS = MAX_MONTHS // 12
+
+
+def _check_months(months):
+    if months <= 0:
+        raise ValueError("months must be positive")
+    if months > MAX_MONTHS:
+        raise ValueError("months can be at most %d (100 years)" % MAX_MONTHS)
+
+
+def _check_years(years):
+    if not 0 < int(years) <= MAX_YEARS:
+        raise ValueError("years must be between 1 and %d" % MAX_YEARS)
 
 
 def loan_payment(principal_cents, annual_rate, months):
     """Fixed monthly payment that repays ``principal`` over ``months``."""
-    if months <= 0:
-        raise ValueError("months must be positive")
+    _check_months(months)
     r = annual_rate / 100 / 12
     if r == 0:
         return math.ceil(principal_cents / months)
@@ -54,9 +66,18 @@ def debt_payoff(debts, monthly_budget_cents, strategy="avalanche"):
     """
     if strategy not in ("avalanche", "snowball"):
         raise ValueError("strategy must be avalanche or snowball")
-    state = [{"name": d["name"], "balance": int(d["balance_cents"]), "rate": float(d["rate"]),
-              "min": int(d["min_payment_cents"]), "interest": 0, "paid_off_month": None}
-             for d in debts if int(d["balance_cents"]) > 0]
+    state = []
+    for n, d in enumerate(debts, 1):
+        try:
+            item = {"name": str(d.get("name") or "Debt %d" % n), "balance": int(d["balance_cents"]),
+                    "rate": float(d.get("rate") or 0), "min": int(d.get("min_payment_cents") or 0),
+                    "interest": 0, "paid_off_month": None}
+        except (AttributeError, KeyError, TypeError, ValueError):
+            raise ValueError("debt %d needs a balance, an interest rate and a minimum payment" % n)
+        if not math.isfinite(item["rate"]) or item["rate"] < 0 or item["min"] < 0:
+            raise ValueError("debt %d: rate and minimum payment can't be negative" % n)
+        if item["balance"] > 0:
+            state.append(item)
     minimums = sum(d["min"] for d in state)
     if monthly_budget_cents < minimums:
         raise ValueError("monthly budget is below the total minimum payments (%d cents)" % minimums)
@@ -109,6 +130,7 @@ def compound_growth(principal_cents, monthly_contribution_cents, annual_return, 
     ``contribution_growth`` raises the monthly contribution by that % each year.
     ``inflation`` is used to report balances in today's money.
     """
+    _check_years(years)
     r = annual_return / 100 / 12
     balance, contributed = float(principal_cents), float(principal_cents)
     contribution = float(monthly_contribution_cents)
@@ -162,8 +184,7 @@ def retirement_plan(current_age, retirement_age, current_savings_cents, monthly_
 
 def savings_plan(target_cents, current_cents, months, annual_rate=0.0):
     """Monthly deposit required to reach ``target`` in ``months``."""
-    if months <= 0:
-        raise ValueError("months must be positive")
+    _check_months(months)
     r = annual_rate / 100 / 12
     fv_current = current_cents * (1 + r) ** months
     remaining = max(0.0, target_cents - fv_current)

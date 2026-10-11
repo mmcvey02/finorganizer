@@ -440,8 +440,10 @@ pages.transactions = async (params) => {
   const qs = new URLSearchParams({ ...f, limit: 500 });
   const showChart = pref("txChart", "on") === "on";
   const pieQ = new URLSearchParams(Object.entries({ start: f.start, end: f.end, account_id: f.account_id }).filter(([, v]) => v));
-  const [txs, conns, spend] = await Promise.all([GET(`/api/transactions?${qs}`), bankConnections(),
-    showChart ? GET(`/api/reports/spending-by-category?${pieQ}`) : null]);
+  const [txs, conns, spend, unmatched] = await Promise.all([GET(`/api/transactions?${qs}`), bankConnections(),
+    showChart ? GET(`/api/reports/spending-by-category?${pieQ}`) : null,
+    GET("/api/transfers/unmatched").catch(() => ({ missing: [], waiting: 0 }))]);
+  const lonely = new Set(unmatched.missing.map((t) => t.id));
   const counted = txs.filter((t) => !isTransfer(t));
   const moneyIn = counted.reduce((s, t) => s + Math.max(0, t.amount_cents), 0);
   const moneyOut = counted.reduce((s, t) => s - Math.min(0, t.amount_cents), 0);
@@ -459,6 +461,7 @@ pages.transactions = async (params) => {
       <button id="add">+ Transaction</button></div>
     ${syncErrors.map((c) => `<div class="insight warning"><span class="icon">!</span><span>${esc(c.label)}: ${esc(c.last_error)}
       <a href="#accounts">Fix on the Accounts page</a></span></div>`).join("")}
+    ${unmatchedPanel(unmatched)}
     ${showChart ? spendAnalyzer(spend, f) : `<div class="filters" style="justify-content:flex-end;margin-bottom:8px">
       <button class="link" id="chart-toggle">Show spending chart</button></div>`}
     <div class="card">
@@ -481,7 +484,7 @@ pages.transactions = async (params) => {
           <td class="hide-sm">${esc(t.account_name)}</td>
           <td>${t.transfer_id ? `<button type="button" class="pill unlink" title="Money moved between your own accounts; not counted as spending or income. Click if this isn't a transfer.">Transfer</button>
               <span class="muted small">${t.amount_cents < 0 ? "to" : "from"} ${esc(t.transfer_account_name || "")}</span>`
-            : `<select class="cat" aria-label="Category">${categoryOptions(t.category_id)}</select>${t.auto_category ? ' <span class="pill auto-tag" title="Guessed automatically. Pick another category if it\'s wrong; FinOrganizer will remember.">auto</span>' : ""}${t.category_kind === "transfer" ? ' <button class="link which" title="Record it in the other account too, so both balances are right">Which account?</button>' : ""}`}</td>
+            : `<select class="cat" aria-label="Category">${categoryOptions(t.category_id)}</select>${t.auto_category ? ' <span class="pill auto-tag" title="Guessed automatically. Pick another category if it\'s wrong; FinOrganizer will remember.">auto</span>' : ""}${t.category_kind === "transfer" ? ` ${lonely.has(t.id) ? '<span class="pill warn" title="No matching transaction in your other accounts">one side only</span>' : ""}<button class="link which" title="Record it in the other account too, so both balances are right">Which account?</button>` : ""}`}</td>
           ${moneyCell(t.amount_cents)}
           <td class="actions">${t.transfer_id ? "" : '<button class="link mk-transfer" title="Money moved to or from another of your accounts">Transfer…</button>'}<button class="link edit">Edit</button><button class="link danger del">Delete</button></td></tr>`).join("")
           : `<tr><td colspan="6" class="empty">No transactions match.</td></tr>`}</tbody></table></div>
@@ -496,6 +499,7 @@ pages.transactions = async (params) => {
   form.onsubmit = (e) => { e.preventDefault(); apply(); };
   $("#clear").onclick = () => (location.hash = "transactions");
   wireSpendAnalyzer(spend, f);
+  wireUnmatchedPanel(unmatched);
   const txSync = $("#tx-sync");
   if (txSync) txSync.onclick = () => syncBanks().catch(() => {});
   $("#add").onclick = () => editTransaction(null, { account_id: f.account_id }).then(route);
@@ -559,6 +563,71 @@ async function markTransfer(t) {
       (r.similar ? `, and ${r.similar} more like it` : ""));
   await loadShared();
   return true;
+}
+
+// ------------------------------------------------- transfers missing a side
+
+// A transfer between your own accounts should be listed twice (out of one, into the
+// other). These were found in only one account.
+function unmatchedPanel(u) {
+  if (!u.missing.length) return "";
+  const n = u.missing.length;
+  const open = pref("unmatchedOpen", "") === "1";
+  // Preselect the likeliest account: a possible match's, one named in the description,
+  // else a savings/checking account.
+  const likely = (t, list) => {
+    const text = `${t.payee} ${t.memo}`.toLowerCase();
+    return (t.matches[0] && list.find((a) => a.id === t.matches[0].account_id))
+      || list.find((a) => text.includes(a.name.toLowerCase()))
+      || list.find((a) => a.type === (t.amount_cents < 0 ? "savings" : "checking"))
+      || list.find((a) => ["savings", "checking"].includes(a.type)) || list[0];
+  };
+  const others = (t) => {
+    const list = store.accounts.filter((a) => a.id !== t.account_id);
+    const pick = likely(t, list);
+    return list.map((a) => `<option value="${a.id}" ${pick && a.id === pick.id ? "selected" : ""}>${esc(a.name)}</option>`).join("");
+  };
+  return `<div class="insight warning"><span class="icon">!</span><span>
+      <strong>${n} transfer${n === 1 ? "" : "s"} between your accounts ${n === 1 ? "appears" : "appear"} in only one account.</strong>
+      A transfer should be listed in both accounts, or the other balance is off.
+      <button class="link" id="unmatched-toggle" aria-expanded="${open}">${open ? "Hide" : "Review"}</button></span></div>
+    <div class="card" id="unmatched-list" ${open ? "" : "hidden"} style="margin-bottom:16px">
+      <h2>Transfers missing their other side</h2>
+      ${u.missing.map((t) => `<div class="unmatched" data-id="${t.id}">
+        <div class="unmatched-head"><strong>${esc(t.payee || "Transfer")}</strong>
+          <span class="muted small">${esc(t.date)} · ${esc(t.account_name)}</span>
+          <span class="num ${t.amount_cents < 0 ? "neg" : ""}" style="margin-left:auto">${money(t.amount_cents)}</span></div>
+        ${t.matches.length ? `<div class="small">Possible match${t.matches.length === 1 ? "" : "es"} in your other accounts:
+            ${t.matches.map((m) => `<button class="ghost link-match" data-other="${m.id}">Link with ${money(m.amount_cents)} in ${esc(m.account_name)} on ${esc(m.date)}${m.payee ? ` (${esc(m.payee)})` : ""}</button>`).join(" ")}</div>`
+          : `<div class="small muted">No matching transaction found in your other accounts.</div>`}
+        <div class="filters small" style="margin-top:6px">
+          <label class="field">${t.amount_cents < 0 ? "Add it to" : "Add it from"}<select class="add-to">${others(t)}</select></label>
+          <button class="ghost add-side">Add the other side</button>
+          <button class="link not-ours">The other account isn't in FinOrganizer</button>
+        </div></div>`).join("")}
+    </div>`;
+}
+
+function wireUnmatchedPanel(u) {
+  const toggle = $("#unmatched-toggle");
+  if (!toggle) return;
+  toggle.onclick = () => {
+    const list = $("#unmatched-list");
+    list.hidden = !list.hidden;
+    setPref("unmatchedOpen", list.hidden ? "" : "1");
+    toggle.textContent = list.hidden ? "Review" : "Hide";
+    toggle.setAttribute("aria-expanded", String(!list.hidden));
+  };
+  const done = async (p, msg) => { if (await attempt(() => p, msg)) { await loadShared(); route(); } };
+  $$(".unmatched").forEach((box) => {
+    const id = Number(box.dataset.id);
+    $$(".link-match", box).forEach((b) => (b.onclick = () =>
+      done(api("POST", `/api/transactions/${id}/link`, { other_id: Number(b.dataset.other) }), "Linked: both sides of the transfer are recorded")));
+    $(".add-side", box).onclick = () => done(api("POST", `/api/transactions/${id}/transfer`,
+      { account_id: Number($(".add-to", box).value) }), "Added the other side of the transfer");
+    $(".not-ours", box).onclick = () => done(api("POST", `/api/transactions/${id}/transfer`, { account_id: null }),
+      "Noted: not counted as spending or income");
+  });
 }
 
 // ----------------------------------------------------------- spend analyzer

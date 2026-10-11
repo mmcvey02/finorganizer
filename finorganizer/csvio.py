@@ -3,8 +3,9 @@
 import csv
 import datetime as dt
 import io
+from collections import Counter
 
-from .ledger import add_transaction, find_category, list_transactions
+from .ledger import add_transaction, find_category, get_account, list_transactions
 from .categorize import Categorizer, enabled, process_new
 from .money import to_cents
 
@@ -62,14 +63,18 @@ def import_csv(conn, account_id, text, invert=False, day_first=False, skip_dupli
     ``invert`` flips signs (for statements where purchases are positive, e.g. many
     credit cards). Returns a dict with counts of imported / duplicates / errors.
     """
+    get_account(conn, account_id)  # one clear error instead of one per line
     reader = csv.DictReader(io.StringIO(text.lstrip("﻿")))
     mapping = _map_columns(reader.fieldnames or [])
     categorizer = Categorizer(conn) if enabled(conn) else None
-    existing = set()
+    # A row is a duplicate if the account already has it. Identical rows within the file
+    # (two $5 coffees on the same day) are separate purchases, so they're counted: the
+    # 2nd matching row is a duplicate only if the account already has two.
+    existing, seen = Counter(), Counter()
     if skip_duplicates:
         for r in conn.execute("SELECT date, amount_cents, LOWER(payee) FROM transactions"
                               " WHERE account_id = ?", (account_id,)):
-            existing.add(tuple(r))
+            existing[tuple(r)] += 1
     imported, duplicates, errors = 0, 0, []
     for lineno, rec in enumerate(reader, start=2):
         try:
@@ -90,10 +95,10 @@ def import_csv(conn, account_id, text, invert=False, day_first=False, skip_dupli
                 category_id = find_category(
                     conn, cat_name, create_kind="income" if amount > 0 else "expense")["id"]
             key = (date.isoformat(), amount, payee.lower())
-            if key in existing:
+            seen[key] += 1
+            if seen[key] <= existing[key]:
                 duplicates += 1
                 continue
-            existing.add(key)
             add_transaction(conn, account_id, date, amount, payee, category_id, memo, commit=False,
                             categorizer=categorizer, auto_categorize=categorizer is not None)
             imported += 1
@@ -108,11 +113,21 @@ def import_csv(conn, account_id, text, invert=False, day_first=False, skip_dupli
 EXPORT_FIELDS = ("id", "date", "account_name", "payee", "category_name", "amount", "memo", "cleared")
 
 
+def _cell(text):
+    """Text that a spreadsheet won't run as a formula (bank descriptions are untrusted)."""
+    text = text or ""
+    return "'" + text if text[:1] in ("=", "+", "-", "@", "\t", "\r") else text
+
+
+def _amount(cents):
+    return "%s%d.%02d" % ("-" if cents < 0 else "", abs(cents) // 100, abs(cents) % 100)
+
+
 def export_csv(conn, **filters):
     buf = io.StringIO()
     w = csv.writer(buf)
     w.writerow(EXPORT_FIELDS)
     for t in reversed(list_transactions(conn, **filters)):
-        w.writerow([t["id"], t["date"], t["account_name"], t["payee"], t["category_name"] or "",
-                    "%.2f" % (t["amount_cents"] / 100), t["memo"], int(t["cleared"])])
+        w.writerow([t["id"], t["date"], _cell(t["account_name"]), _cell(t["payee"]),
+                    _cell(t["category_name"]), _amount(t["amount_cents"]), _cell(t["memo"]), int(t["cleared"])])
     return buf.getvalue()

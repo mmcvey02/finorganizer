@@ -29,6 +29,8 @@ def to_cents(value):
         d = Decimal(s)
     except InvalidOperation:
         raise ValueError("invalid amount: %r" % value)
+    if not d.is_finite():  # "NaN", "Infinity"
+        raise ValueError("invalid amount: %r" % value)
     cents = int((d * 100).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
     return -cents if negative else cents
 

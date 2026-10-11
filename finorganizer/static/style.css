@@ -282,3 +282,9 @@ input.switch:disabled { opacity: 0.6; }
   .spend-grid .legend-list { width: 100%; }
 }
 @media (prefers-reduced-motion: reduce) { .donut .slice { transition: none; } }
+
+/* Transfers missing their other side (Transactions) */
+.unmatched { padding: 10px 0; border-top: 1px solid var(--border); display: grid; gap: 6px; }
+.unmatched:first-of-type { border-top: 0; }
+.unmatched-head { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; }
+.unmatched .link-match { margin: 4px 4px 0 0; font-size: 13px; }
