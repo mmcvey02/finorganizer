@@ -152,7 +152,7 @@ SimpleFIN site) cuts off access.
 
 The **Investments** page shows your brokerage and retirement accounts in one place:
 
-- **Overview:** portfolio value, today's change, total gain, how much you invested over the
+- **Overview:** a portfolio value chart (1 month to all time), portfolio value, today's change, total gain, how much you invested over the
   past year, your asset mix (US and international stocks, bonds, cash, ...), and how your
   current holdings did over the past year next to the S&P 500. FinOrganizer also records the
   portfolio's value each day you open the page, building a value-over-time chart that separates

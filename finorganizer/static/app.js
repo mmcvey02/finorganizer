@@ -1860,7 +1860,6 @@ function performanceCard(d) {
       <dt>Value then</dt><dd>${money(since.start_cents, { whole: true })}</dd>
       <dt>Added from your other accounts</dt><dd>${signedMoney(since.contributed_cents)}</dd>
       <dt>Market growth</dt><dd class="${gainClass(since.growth_cents)}">${signedMoney(since.growth_cents)}${since.growth_pct !== null ? ` (${signedPct(since.growth_pct)})` : ""}</dd></dl>`;
-    if (d.history.length >= 3) html += `<div id="hist-chart" style="margin-top:10px"></div>`;
   } else {
     html += `<p class="small muted" style="margin-top:14px">FinOrganizer records your portfolio's value each day you open this page, so a value-over-time chart builds up here.</p>`;
   }
@@ -1938,6 +1937,49 @@ pages.investments = async (params) => {
   if (tab === "suggestions") renderSuggestions(box, d, reload);
 };
 
+const VALUE_RANGES = { "1m": ["1M", 31], "3m": ["3M", 92], "6m": ["6M", 183], "1y": ["1Y", 366], all: ["All", null] };
+
+/* The big "Portfolio value" chart at the top of the Overview, with range chips. */
+function drawValueChart(d) {
+  const card = $("#value-card");
+  if (!card) return;
+  const vh = d.value_history || { points: [], daily: false };
+  let range = pref("investRange", "1y");
+  if (!VALUE_RANGES[range]) range = "1y";
+  const render = () => {
+    let pts = vh.points;
+    const days = VALUE_RANGES[range][1];
+    if (vh.daily && days && pts.length) {
+      const cut = new Date(new Date(d.as_of + "T00:00").getTime() - days * 864e5).toISOString().slice(0, 10);
+      const inRange = pts.filter((p) => p.date >= cut);
+      pts = inRange.length >= 2 ? inRange : pts.slice(-2);
+    }
+    const first = pts[0], last = pts[pts.length - 1];
+    const change = pts.length >= 2 ? last.value_cents - first.value_cents : null;
+    const changePct = change !== null && first.value_cents > 0 ? 100 * change / first.value_cents : null;
+    card.innerHTML = `<div class="value-head">
+        <div><h2 style="margin-bottom:4px">Portfolio value</h2>
+          <div class="value-now">${money(d.total_cents, { whole: true })}
+            ${change !== null ? `<span class="${gainClass(change)} value-change">${signedMoney(change)}${changePct !== null ? ` (${signedPct(changePct)})` : ""}</span>
+              <div class="muted small">since ${esc(longDate(first.date))}</div>` : ""}</div></div>
+        ${vh.daily ? `<div class="chips">${Object.entries(VALUE_RANGES).map(([k, [label]]) =>
+          `<button class="chip ${k === range ? "active" : ""}" data-range="${k}">${label}</button>`).join("")}</div>` : ""}
+      </div>
+      <div id="value-chart"></div>
+      <p class="small muted" style="margin:6px 0 0">${esc(vh.note || "")}</p>`;
+    const box = $("#value-chart");
+    if (pts.length >= 2) {
+      box.append(lineChart(pts.map((p) => ({ label: shortDate(p.date), tip: longDate(p.date), value: p.value_cents })),
+        { valueLabel: "Portfolio value", width: box.clientWidth, height: 240,
+          color: change !== null && change < 0 ? "var(--series-2)" : "var(--series-1)" }));
+    } else {
+      box.innerHTML = `<div class="empty" style="padding:20px">Not enough history for a chart yet.</div>`;
+    }
+    $$(".chip[data-range]", card).forEach((b) => (b.onclick = () => { range = b.dataset.range; setPref("investRange", range); render(); }));
+  };
+  render();
+}
+
 function renderInvestOverview(box, d) {
   if (!d.accounts.length) {
     box.innerHTML = `<div class="card empty"><h2>Track your investments</h2>
@@ -1954,6 +1996,7 @@ function renderInvestOverview(box, d) {
         <div class="sub">${d.gain_cents != null ? `${signedPct(d.gain_pct)} on ${money(d.cost_cents, { whole: true })} cost${d.cost_coverage < 99 ? ` · ${d.cost_coverage.toFixed(0)}% of holdings have a cost basis` : ""}` : "add cost basis to see gains"}</div></div>
       <div class="card tile"><div class="label">Invested, last 12 months</div><div class="value">${money(d.invested_year_cents, { whole: true })}</div><div class="sub">moved from your other accounts</div></div>
     </div>
+    <div class="card" id="value-card" style="margin-bottom:16px"></div>
     <div class="grid invest-grid">
       ${performanceCard(d)}
       <div class="stack">
@@ -1970,8 +2013,7 @@ function renderInvestOverview(box, d) {
   const pc = $("#perf-chart");
   if (pc && d.past_year) pc.append(pctLineChart(d.past_year.points.map((p) => ({ label: shortDate(p.date), tip: longDate(p.date), you: p.portfolio_pct, bench: p.benchmark_pct })),
     [{ key: "you", label: "Your holdings", color: "var(--series-1)" }, { key: "bench", label: d.past_year.benchmark, color: "var(--series-2)" }], { width: pc.clientWidth }));
-  const hc = $("#hist-chart");
-  if (hc) hc.append(lineChart(d.history.map((h) => ({ label: shortDate(h.date), tip: longDate(h.date), value: h.value_cents })), { valueLabel: "Portfolio", width: hc.clientWidth, height: 180 }));
+  drawValueChart(d);
 }
 
 function renderHoldings(box, d, reload) {

@@ -607,6 +607,7 @@ def portfolio(conn, quotes=None, today=None, record=True):
         "asset_classes": ASSET_CLASSES,
         "kinds": KINDS,
     }
+    result["value_history"] = value_history(conn, result, today)
     result["suggestions"] = suggestions(conn, result, today)
     result["disclaimer"] = DISCLAIMER
     return result
@@ -660,7 +661,57 @@ def past_year(holdings, quotes, total):
         sampled.append(points[-1])
     return {"start_date": dates[0], "portfolio_pct": points[-1]["portfolio_pct"],
             "benchmark_pct": points[-1]["benchmark_pct"], "benchmark": "S&P 500",
-            "coverage_pct": round(100.0 * covered / total, 1), "points": sampled}
+            "coverage_pct": round(100.0 * covered / total, 1), "points": sampled,
+            # In dollars, scaled so the last point is exactly today's value.
+            "values": [{"date": d, "value_cents": int(round(v * total / series[-1][1]))} for d, v in series]}
+
+
+def flow_history(conn, accounts, today, months=12):
+    """Month-end value of the investment accounts, worked back from today's value by undoing
+    the money recorded going in or out since then (market moves before today aren't known)."""
+    from .money import add_months, month_bounds
+    ids = [a["id"] for a in accounts]
+    if not ids:
+        return []
+    marks = "(%s)" % ", ".join("?" * len(ids))
+    total = sum(a["value_cents"] for a in accounts)
+    first = add_months(today.replace(day=1), -months)
+    points = []
+    for k in range(months):
+        end = month_bounds(add_months(first, k).strftime("%Y-%m"))[1]
+        later = conn.execute("SELECT COALESCE(SUM(amount_cents), 0) FROM transactions WHERE account_id IN "
+                             + marks + " AND date > ?", ids + [end]).fetchone()[0]
+        points.append({"date": end, "value_cents": total - later})
+    points.append({"date": today.isoformat(), "value_cents": total})
+    return points
+
+
+def value_history(conn, p, today):
+    """The portfolio's value over time, from the best data there is:
+
+    1. price history for what you hold today (needs live prices),
+    2. the values recorded each day the Investments page was opened,
+    3. today's value minus the money recorded going in and out (monthly).
+    """
+    if p["past_year"]:
+        return {"source": "prices", "daily": True, "points": p["past_year"]["values"],
+                "note": "Estimated from what you hold today and each day's closing prices."}
+    hist = p["history"]
+    if len(hist) >= 7:
+        return {"source": "recorded", "daily": True, "points": hist,
+                "note": "Recorded each day you opened the Investments page."}
+    inv = [a for a in p["accounts"]]
+    pts = flow_history(conn, inv, today)
+    if pts and len({x["value_cents"] for x in pts}) > 1:
+        return {"source": "transactions", "daily": False, "points": pts,
+                "note": "Month by month, from the money recorded going in and out of these accounts. "
+                        "Market gains and losses before today aren't included."}
+    if len(hist) >= 2:
+        return {"source": "recorded", "daily": True, "points": hist,
+                "note": "Recorded each day you opened the Investments page."}
+    return {"source": "none", "daily": False, "points": [],
+            "note": "Your portfolio's history fills in as prices load or as FinOrganizer records its "
+                    "value each day you open this page."}
 
 
 # -------------------------------------------------------------- suggestions
