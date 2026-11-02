@@ -15,7 +15,8 @@ import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from . import backup, banksync, categorize, csvio, db, ledger, planning, reports, sample, summary_page, updater
+from . import (backup, banksync, categorize, csvio, db, investments, ledger, market, planning, reports,
+               sample, summary_page, updater)
 from .db import ACCOUNT_TYPES, CATEGORY_KINDS, FREQUENCIES
 from .profiles import DEFAULT_ID
 from .money import month_bounds, month_of, today
@@ -295,6 +296,28 @@ def build_router(app=None):
     r.add("POST", r"/api/remote-accounts/(\d+)/match-balance",
           lambda c, q, b, i: banksync.match_bank_balance(c, i))
 
+    # investments (GET /api/investments and /api/market are answered in respond(): they may
+    # download prices, which must not hold the database lock)
+    def holding_fields(b):
+        out = {k: b[k] for k in ("symbol", "name", "shares", "price", "asset_class", "kind", "expense_ratio",
+                                 "account_id") if k in b}
+        for k in ("value_cents", "cost_basis_cents"):
+            if k in b:
+                out[k] = _opt_int(b[k])
+        return out
+
+    def add_holding(c, q, b):
+        f = holding_fields(b)
+        return {"id": investments.add_holding(c, _int(f.pop("account_id", None), "account_id"), **f)}
+
+    r.add("POST", "/api/holdings", add_holding)
+    r.add("PUT", r"/api/holdings/(\d+)", lambda c, q, b, i: investments.update_holding(c, i, **holding_fields(b)))
+    r.add("DELETE", r"/api/holdings/(\d+)", lambda c, q, b, i: investments.delete_holding(c, i))
+    r.add("POST", "/api/holdings/import", lambda c, q, b: investments.import_positions(
+        c, _int(b.get("account_id"), "account_id"), b.get("csv") or ""))
+    r.add("PUT", "/api/investments/profile", lambda c, q, b: investments.set_profile(
+        c, b.get("age"), b.get("risk") or None))
+
     # import / export
     r.add("POST", "/api/import", lambda c, q, b: csvio.import_csv(
         c, _int(b.get("account_id")), b.get("csv") or "", bool(b.get("invert")),
@@ -388,6 +411,15 @@ def respond(app, method, path, query_string="", raw_body=b""):
         if path == "/api/update" and method == "GET":
             # Network call to GitHub: done outside the database lock.
             return 200, json_type, json.dumps(updater.check()).encode(), {}
+        if path == "/api/market" and method == "GET":
+            if not market.available():
+                raise HTTPError(503, "market data isn't available in the iPhone version")
+            data = market.overview()  # network: outside the database lock
+            if not data["items"]:
+                raise HTTPError(502, (data["errors"] or ["couldn't load market data"])[0])
+            return 200, json_type, json.dumps(data).encode(), {}
+        if path == "/api/investments" and method == "GET":
+            return 200, json_type, json.dumps(investments_page(app, query.get("live") == "1")).encode(), {}
         if path == "/summary" and method == "GET":
             with app.lock:
                 page = summary_page.render(app.conn, query.get("month") or None,
@@ -422,6 +454,31 @@ def respond(app, method, path, query_string="", raw_body=b""):
         except sqlite3.Error:
             pass
         return 500, json_type, json.dumps({"error": "something went wrong (%s: %s)" % (type(e).__name__, e)}).encode(), {}
+
+
+def investments_page(app, live=False):
+    """The Investments page's data; with ``live``, first refresh prices from the market."""
+    quotes, errors, fetched = {}, [], False
+    if market.available():
+        with app.lock:
+            symbols = investments.symbols_to_price(app.conn) + [market.BENCHMARK]
+        if live:
+            quotes, failed = market.charts(symbols)  # network: no lock held
+            errors, fetched = sorted(set(failed.values()))[:3], True
+        else:
+            quotes = market.cached(symbols)  # prices downloaded earlier, if any
+    with app.lock:
+        try:
+            if fetched and quotes:
+                investments.apply_prices(app.conn, quotes)
+            data = investments.portfolio(app.conn, quotes)
+        except Exception:
+            app.conn.rollback()
+            raise
+    data["live"] = bool(quotes)
+    data["price_errors"] = errors
+    data["market_available"] = market.available()
+    return data
 
 
 def backup_filename(app):

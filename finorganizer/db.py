@@ -146,6 +146,37 @@ CREATE TABLE IF NOT EXISTS remote_accounts (
     ignored INTEGER NOT NULL DEFAULT 0,
     UNIQUE (connection_id, remote_id)
 );
+
+-- What an investment account holds. price is per share in dollars (it can have fractions
+-- of a cent); cost_basis_cents is the total paid (NULL = unknown). An empty asset_class or
+-- kind means "work it out from the symbol and name". source: manual, import or bank.
+CREATE TABLE IF NOT EXISTS holdings (
+    id INTEGER PRIMARY KEY,
+    account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    symbol TEXT NOT NULL DEFAULT '',
+    name TEXT NOT NULL DEFAULT '',
+    shares REAL NOT NULL DEFAULT 0,
+    price REAL,
+    value_cents INTEGER NOT NULL DEFAULT 0,
+    cost_basis_cents INTEGER,
+    asset_class TEXT NOT NULL DEFAULT '',
+    kind TEXT NOT NULL DEFAULT '',
+    expense_ratio REAL,
+    source TEXT NOT NULL DEFAULT 'manual',
+    external_id TEXT,
+    price_date TEXT,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_holdings_account ON holdings(account_id);
+
+-- Each investment account's value, once a day when the Investments page is opened.
+CREATE TABLE IF NOT EXISTS portfolio_snapshots (
+    date TEXT NOT NULL,
+    account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    value_cents INTEGER NOT NULL,
+    cost_cents INTEGER,
+    PRIMARY KEY (date, account_id)
+);
 """
 
 # Columns added after the first release; applied to existing databases on open.

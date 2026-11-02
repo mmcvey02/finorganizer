@@ -21,6 +21,7 @@ import urllib.request
 
 from .categorize import Categorizer, enabled, process_new
 from .db import row, rows
+from .investments import apply_bank_holdings
 from .ledger import NotFound, add_account, get_account, reconcile_transfers
 from .money import to_cents
 from . import __version__
@@ -446,6 +447,8 @@ def sync_connection(conn, connection_id, today=None, _rerun=False):
         start = dt.date.fromisoformat(c["last_sync"][:10]) - dt.timedelta(days=OVERLAP_DAYS)
     else:
         start = today - dt.timedelta(days=FIRST_SYNC_DAYS)
+    # A last sync "in the future" (the computer's clock was changed) must not leave nothing to fetch.
+    start = min(start, end - dt.timedelta(days=OVERLAP_DAYS))
     # Newly linked accounts get full history even if the connection synced before.
     for name in ("backfill", "rebase_opening"):
         conn.execute("DELETE FROM settings WHERE key LIKE ? AND CAST(substr(key, ?) AS INTEGER)"
@@ -458,7 +461,7 @@ def sync_connection(conn, connection_id, today=None, _rerun=False):
     categorizer = Categorizer(conn) if enabled(conn) else None
     discovered = []
     try:
-        remote_by_id = {}
+        remote_by_id, holdings_by_id = {}, {}
         for w_start, w_end in _windows(start, end):
             payload = fetch_accounts(c["access_url"], w_start, w_end)
             result["errors"] += [e for e in _errors(payload) if e not in result["errors"]]
@@ -467,6 +470,8 @@ def sync_connection(conn, connection_id, today=None, _rerun=False):
             for a in accounts:
                 if a.get("id") not in (None, ""):
                     remote_by_id.setdefault(str(a["id"]), []).extend(a.get("transactions") or [])
+                    if isinstance(a.get("holdings"), list):  # brokerages that report what you own
+                        holdings_by_id[str(a["id"])] = a["holdings"]
         # Bank accounts that appeared for the first time in this download.
         before = {r["id"] for r in rows(conn.execute(
             "SELECT id FROM remote_accounts WHERE connection_id = ? AND account_id IS NOT NULL",
@@ -482,6 +487,9 @@ def sync_connection(conn, connection_id, today=None, _rerun=False):
                                             categorizer, result["errors"])
             result["imported"] += imp
             result["matched"] += mat
+            if r["remote_id"] in holdings_by_id:
+                result["holdings"] = result.get("holdings", 0) + apply_bank_holdings(
+                    conn, r["account_id"], holdings_by_id[r["remote_id"]])
             _take_flag(conn, "backfill", r["account_id"])
             if _take_flag(conn, "rebase_opening", r["account_id"]):
                 # Account was created from the bank: make history + opening add up to the bank balance.
@@ -509,6 +517,8 @@ def sync_connection(conn, connection_id, today=None, _rerun=False):
         more = sync_connection(conn, connection_id, today, _rerun=True)
         result["imported"] += more["imported"]
         result["matched"] += more["matched"]
+        if more.get("holdings"):
+            result["holdings"] = result.get("holdings", 0) + more["holdings"]
         result["transfers_linked"] = result.get("transfers_linked", 0) + more.get("transfers_linked", 0)
         result["added_accounts"] += discovered
         result["errors"] += [e for e in more["errors"] if e not in result["errors"]]
