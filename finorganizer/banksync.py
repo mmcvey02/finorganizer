@@ -447,6 +447,8 @@ def sync_connection(conn, connection_id, today=None, _rerun=False):
         start = dt.date.fromisoformat(c["last_sync"][:10]) - dt.timedelta(days=OVERLAP_DAYS)
     else:
         start = today - dt.timedelta(days=FIRST_SYNC_DAYS)
+    # A last sync "in the future" (the computer's clock was changed) must not leave nothing to fetch.
+    start = min(start, end - dt.timedelta(days=OVERLAP_DAYS))
     # Newly linked accounts get full history even if the connection synced before.
     for name in ("backfill", "rebase_opening"):
         conn.execute("DELETE FROM settings WHERE key LIKE ? AND CAST(substr(key, ?) AS INTEGER)"
