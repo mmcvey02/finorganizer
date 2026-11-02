@@ -148,6 +148,34 @@ The connection's access key is stored in your profile's data file, so protect th
 your other financial records; removing the connection in the app (or revoking it on the
 SimpleFIN site) cuts off access.
 
+## Investments
+
+The **Investments** page shows your brokerage and retirement accounts in one place:
+
+- **Overview:** portfolio value, today's change, total gain, how much you invested over the
+  past year, your asset mix (US and international stocks, bonds, cash, ...), and how your
+  current holdings did over the past year next to the S&P 500. FinOrganizer also records the
+  portfolio's value each day you open the page, building a value-over-time chart that separates
+  market growth from money you added.
+- **Holdings:** every fund, stock and cash position with shares, price, value, cost basis and gain.
+  Get them in by **Import positions** (on schwab.com: Accounts → Positions → Export; Fidelity and
+  Vanguard have a similar download) or **+ Holding** to type one in. If your bank connection
+  reports holdings (SimpleFIN does for some brokerages), they're filled in automatically on
+  each sync.
+- **Suggestions:** rules of thumb for improving the portfolio: stock/bond mix against a target
+  for your age and risk tolerance, concentration in single stocks, international diversification,
+  uninvested cash, fund fees, tax-loss harvesting in taxable accounts, how much of your income
+  you invest, and the basics that come first (an emergency fund, paying off high-interest debt).
+  They're general guidance, not personal financial advice.
+- **Market:** the S&P 500, Nasdaq, Dow, small companies, international stocks, bonds, the
+  10-year Treasury yield, the VIX and gold, with 1-day, 1-month, year-to-date and 1-year moves
+  and a few plain-English notes on what they mean.
+
+Prices come from Yahoo Finance's public data (no account or key needed, delayed up to 15
+minutes) and update holding values while you're online. Only ticker symbols are sent, never
+amounts or account details. The iPhone version has no live prices; it uses the values you
+enter or import.
+
 ## Features
 
 **Tracking**
@@ -231,6 +259,11 @@ finorganizer bank connect <SETUP_TOKEN>      # link banks via SimpleFIN
 finorganizer bank link 1 --new               # or --account "Everyday Checking" / --ignore
 finorganizer bank sync
 finorganizer import checking statement.csv
+finorganizer invest import "Schwab Brokerage" positions.csv   # holdings from a positions download
+finorganizer invest add "Roth IRA" VTI --shares 12 --price 310 --cost 3000
+finorganizer invest suggest --live           # holdings, gains, suggestions (with fresh prices)
+finorganizer invest profile --age 40 --risk moderate
+finorganizer invest market                   # major indexes and what they're doing
 finorganizer export --file transactions.csv
 ```
 
@@ -255,6 +288,8 @@ finorganizer/
   csvio.py     CSV import/export
   profiles.py  separate profiles (one database file each)
   banksync.py  SimpleFIN bank connections and syncing
+  investments.py  holdings, positions-file import, portfolio performance and suggestions
+  market.py    market prices and index data (Yahoo Finance)
   summary_page.py  one-page printable summary with charts
   desktop.py   desktop app: native window via pywebview; closing it quits
   updater.py   checks GitHub Releases and installs updates in the Windows app

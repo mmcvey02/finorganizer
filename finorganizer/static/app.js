@@ -1692,6 +1692,354 @@ pages.planning = async (params) => {
   }
 };
 
+// ----------------------------------------------------------------- investments
+
+const signedPct = (v, digits = 1) => (v === null || v === undefined ? "–" : `${v >= 0 ? "+" : ""}${v.toFixed(digits)}%`);
+const signedMoney = (c) => (c === null || c === undefined ? "–" : `${c >= 0 ? "+" : ""}${money(c)}`);
+const gainClass = (v) => (v === null || v === undefined || v === 0 ? "" : v < 0 ? "neg" : "pos");
+const CLASS_COLORS = { us_stock: "var(--series-1)", intl_stock: "var(--series-3)", bond: "var(--series-4)",
+  balanced: "var(--series-5)", cash: "var(--series-other)", real_estate: "var(--series-2)", crypto: "var(--critical)",
+  other: "var(--muted)", unknown: "var(--border)" };
+
+/* Several lines on a percent axis. series: [{key, label, color}], data: [{label, tip, [key]: percent}] */
+function pctLineChart(data, series, { height = 240, width = 640 } = {}) {
+  const W = Math.max(280, width), H = height, m = { t: 12, r: 12, b: 26, l: 48 };
+  const vals = data.flatMap((d) => series.map((s) => d[s.key]));
+  const ticks = niceScale(Math.min(0, ...vals), Math.max(0, ...vals));
+  const lo = ticks[0], hi = ticks[ticks.length - 1];
+  const x = (i) => m.l + (W - m.l - m.r) * i / Math.max(1, data.length - 1);
+  const y = (v) => m.t + (H - m.t - m.b) * (1 - (v - lo) / (hi - lo || 1));
+  const labelEvery = Math.ceil(data.length / Math.max(2, Math.floor((W - m.l) / 70)));
+  let svg = `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img">`;
+  for (const t of ticks) {
+    svg += `<line class="${t === 0 ? "baseline" : "grid-line"}" x1="${m.l}" x2="${W - m.r}" y1="${y(t)}" y2="${y(t)}"/>`;
+    svg += `<text x="${m.l - 6}" y="${y(t) + 4}" text-anchor="end">${t > 0 ? "+" : ""}${+t.toFixed(1)}%</text>`;
+  }
+  data.forEach((d, i) => {
+    if (i % labelEvery === 0) svg += `<text x="${x(i)}" y="${H - 8}" text-anchor="middle">${esc(d.label)}</text>`;
+  });
+  for (const s of series) {
+    svg += `<polyline points="${data.map((d, i) => `${x(i)},${y(d[s.key])}`).join(" ")}" fill="none" stroke="${s.color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`;
+  }
+  svg += `<line class="xhair" x1="0" x2="0" y1="${m.t}" y2="${H - m.b}" stroke="var(--text-2)" stroke-dasharray="3 3" visibility="hidden"/>`;
+  svg += `<rect class="hit" x="${m.l}" y="${m.t}" width="${W - m.l - m.r}" height="${H - m.t - m.b}" fill="transparent"/></svg>`;
+  const wrap = document.createElement("div");
+  wrap.innerHTML = `<div class="legend">${series.map((s) => `<span><i style="background:${s.color}"></i>${esc(s.label)}</span>`).join("")}</div>` + svg;
+  const el = $("svg", wrap), hit = $(".hit", wrap), xh = $(".xhair", wrap);
+  hit.addEventListener("mousemove", (e) => {
+    const box = el.getBoundingClientRect();
+    const px = (e.clientX - box.left) * (W / box.width);
+    const i = Math.max(0, Math.min(data.length - 1, Math.round((px - m.l) / ((W - m.l - m.r) / Math.max(1, data.length - 1)))));
+    xh.setAttribute("x1", x(i)); xh.setAttribute("x2", x(i)); xh.setAttribute("visibility", "visible");
+    showTip(`<strong>${esc(data[i].tip || data[i].label)}</strong><br>` + series.map((s) =>
+      `<i style="display:inline-block;width:8px;height:8px;border-radius:2px;background:${s.color}"></i> ${esc(s.label)}: ${signedPct(data[i][s.key])}`).join("<br>"), e);
+  });
+  hit.addEventListener("mouseleave", () => { hideTip(); xh.setAttribute("visibility", "hidden"); });
+  return wrap;
+}
+
+function sparkline(values, up) {
+  if (!values || values.length < 2) return "";
+  const W = 90, H = 26, lo = Math.min(...values), hi = Math.max(...values);
+  const pts = values.map((v, i) => `${(W * i / (values.length - 1)).toFixed(1)},${(2 + (H - 4) * (1 - (v - lo) / (hi - lo || 1))).toFixed(1)}`).join(" ");
+  return `<svg class="spark" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" aria-hidden="true"><polyline points="${pts}" fill="none" stroke="${up ? "var(--good)" : "var(--critical)"}" stroke-width="1.5"/></svg>`;
+}
+
+const shortDate = (iso) => new Date(iso + "T00:00").toLocaleDateString(undefined, { month: "short", day: "numeric" });
+const longDate = (iso) => new Date(iso + "T00:00").toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+
+// Prices are downloaded at most every few minutes; the page first shows what's saved.
+const investState = { data: null, fresh: false, liveAt: 0, loading: null };
+const LIVE_REFRESH_MS = 10 * 60e3;
+
+async function loadInvestments({ live = false } = {}) {
+  const data = await GET(`/api/investments${live ? "?live=1" : ""}`);
+  investState.data = data;
+  investState.fresh = true;  // the next render can use it as is
+  if (live) investState.liveAt = Date.now();
+  return data;
+}
+
+function investmentAccountOptions(selected) {
+  const inv = store.accounts.filter((a) => INVESTMENT_TYPES.includes(a.type));
+  const rest = store.accounts.filter((a) => !INVESTMENT_TYPES.includes(a.type));
+  const opt = (a) => `<option value="${a.id}" ${a.id == selected ? "selected" : ""}>${esc(a.name)}</option>`;
+  return (inv.length ? `<optgroup label="Investment accounts">${inv.map(opt).join("")}</optgroup>` : "") +
+    (rest.length ? `<optgroup label="Other accounts">${rest.map(opt).join("")}</optgroup>` : "");
+}
+
+function needInvestmentAccount() {
+  if (store.accounts.some((a) => INVESTMENT_TYPES.includes(a.type))) return false;
+  toast("First add your brokerage or retirement account on the Accounts page (type Investment or Retirement)", true);
+  return true;
+}
+
+async function editHolding(h, d) {
+  if (!h && needInvestmentAccount()) return false;
+  const classes = d.asset_classes, kinds = d.kinds;
+  const v = await formDialog(h ? `Edit ${h.symbol || h.name}` : "Add a holding", [
+    { name: "account_id", label: "Account", type: "select", options: investmentAccountOptions(h ? h.account_id : null), wide: true },
+    { name: "symbol", label: "Symbol", value: h ? h.symbol : "", placeholder: "e.g. SWTSX", hint: "Leave blank for cash or something without one" },
+    { name: "name", label: "Name", value: h ? h.name : "", placeholder: "e.g. Schwab Total Stock Market Index" },
+    { name: "shares", label: "Shares", type: "number", value: h ? h.shares : "" },
+    { name: "price", label: "Price per share", type: "money", value: h && h.price != null ? h.price : "",
+      hint: "With live prices on, this updates by itself" },
+    { name: "value", label: "Current value", type: "money", value: h ? dollars(h.value_cents) : "", hint: "Or leave blank to use shares × price" },
+    { name: "cost", label: "Cost basis (total paid)", type: "money", value: h && h.cost_basis_cents != null ? dollars(h.cost_basis_cents) : "", hint: "Optional; shows your gain or loss" },
+    { name: "asset_class", label: "Asset class", type: "select", options: `<option value="">Automatic</option>` +
+      Object.entries(classes).map(([k, l]) => `<option value="${k}" ${h && h.asset_class_set && h.asset_class === k ? "selected" : ""}>${esc(l)}</option>`).join("") },
+    { name: "kind", label: "Type", type: "select", options: `<option value="">Automatic</option>` +
+      Object.entries(kinds).map(([k, l]) => `<option value="${k}">${esc(l)}</option>`).join("") },
+    { name: "expense_ratio", label: "Expense ratio % per year", type: "number", value: h && h.expense_ratio != null ? h.expense_ratio : "",
+      hint: "Optional, for funds, e.g. 0.03. Listed on the fund's page at your brokerage." },
+  ], h ? "Save" : "Add");
+  if (!v) return false;
+  const shares = v.shares === "" ? 0 : Number(v.shares);
+  const price = v.price === "" ? null : toCents(v.price) / 100;
+  let value = v.value === "" ? null : toCents(v.value);
+  if (h && price !== null && (shares !== h.shares || price !== h.price) && value === h.value_cents) value = null;  // recompute
+  const body = { account_id: Number(v.account_id), symbol: v.symbol, name: v.name, shares, price,
+    value_cents: value, cost_basis_cents: v.cost === "" ? null : toCents(v.cost),
+    asset_class: v.asset_class, kind: v.kind, expense_ratio: v.expense_ratio === "" ? null : Number(v.expense_ratio) };
+  if (h) await attempt(() => api("PUT", `/api/holdings/${h.id}`, body), "Saved");
+  else await attempt(() => api("POST", "/api/holdings", body), "Holding added");
+  return true;
+}
+
+async function importPositions() {
+  if (needInvestmentAccount()) return false;
+  const v = await formDialog("Import positions", [
+    { name: "account_id", label: "Account", type: "select", options: investmentAccountOptions(), wide: true },
+    { name: "file", label: "Positions file (CSV)", type: "file", accept: ".csv,text/csv", wide: true,
+      hint: "Schwab: Accounts → Positions → Export (the download icon at the top right of the list). Fidelity and Vanguard have a similar Download button on their positions pages. Importing again replaces the account's previously imported holdings; ones you added by hand are kept." },
+  ], "Import");
+  if (!v || !v.file) return false;
+  const csv = await v.file.text();
+  const r = await attempt(() => api("POST", "/api/holdings/import", { account_id: Number(v.account_id), csv }));
+  toast(`Imported ${r.imported} holdings worth ${money(r.value_cents, { whole: true })}` + (r.skipped ? ` (${r.skipped} rows skipped)` : ""));
+  return true;
+}
+
+function suggestionList(items, limit) {
+  const list = limit ? items.slice(0, limit) : items;
+  if (!list.length) return `<div class="muted">No suggestions right now.</div>`;
+  return list.map((s) => `<div class="insight ${s.level}"><span class="icon">${{ good: "✓", warning: "!", info: "i" }[s.level]}</span>
+    <span><strong>${esc(s.title)}</strong><br><span class="small">${esc(s.message)}</span></span></div>`).join("");
+}
+
+function allocationBars(d) {
+  if (!d.allocation.length) return `<div class="muted">No holdings yet.</div>`;
+  const stack = `<div class="alloc-stack">${d.allocation.map((a) => `<span style="width:${a.percent}%;background:${CLASS_COLORS[a.asset_class]}" title="${esc(a.label)}: ${a.percent}%"></span>`).join("")}</div>`;
+  const rows = d.allocation.map((a) => `<div class="legend-row static"><span class="swatch" style="background:${CLASS_COLORS[a.asset_class]}"></span>
+    <span>${esc(a.label)}</span><span class="num">${money(a.value_cents, { whole: true })}</span><span class="num muted">${a.percent.toFixed(0)}%</span></div>`).join("");
+  return stack + `<div class="legend-list" style="margin-top:10px">${rows}</div>`;
+}
+
+function performanceCard(d) {
+  const py = d.past_year, since = d.since_tracking;
+  let html = `<div class="card"><h2>Performance</h2>`;
+  if (py) {
+    const beat = py.portfolio_pct - py.benchmark_pct;
+    html += `<p class="small muted" style="margin-top:0">Your current holdings over the past year, compared with the ${esc(py.benchmark)}.
+      This assumes you held the same shares all year, so it shows how your mix of investments has behaved rather than your exact return.</p>
+      <div class="perf-stats">
+        <div class="tile"><div class="label">Your holdings, 1 year</div><div class="value ${gainClass(py.portfolio_pct)}">${signedPct(py.portfolio_pct)}</div></div>
+        <div class="tile"><div class="label">${esc(py.benchmark)}, 1 year</div><div class="value ${gainClass(py.benchmark_pct)}">${signedPct(py.benchmark_pct)}</div></div>
+        <div class="tile"><div class="label">Difference</div><div class="value">${signedPct(beat)}</div><div class="sub">${Math.abs(beat) < 1 ? "about the same" : beat > 0 ? "ahead of the market" : "behind the market"}</div></div>
+      </div><div id="perf-chart"></div>
+      ${py.coverage_pct < 99 ? `<p class="small muted">${(100 - py.coverage_pct).toFixed(0)}% of your portfolio (cash and holdings without a price history) is counted at today's value.</p>` : ""}`;
+  } else if (!d.market_available) {
+    html += `<p class="muted">Price history needs an internet connection, which the iPhone version doesn't have. Gains below use the values you've entered or imported.</p>`;
+  } else if (!d.live) {
+    html += `<p class="muted">${investState.loading ? "Loading prices…" : "Add holdings with ticker symbols to compare them with the market."}</p>`;
+  } else {
+    html += `<p class="muted">Add holdings with ticker symbols (most of your portfolio by value) to compare them with the market over the past year.</p>`;
+  }
+  if (since) {
+    html += `<h2 style="margin-top:16px">Since ${esc(longDate(since.start_date))}</h2><dl class="kv">
+      <dt>Value then</dt><dd>${money(since.start_cents, { whole: true })}</dd>
+      <dt>Added from your other accounts</dt><dd>${signedMoney(since.contributed_cents)}</dd>
+      <dt>Market growth</dt><dd class="${gainClass(since.growth_cents)}">${signedMoney(since.growth_cents)}${since.growth_pct !== null ? ` (${signedPct(since.growth_pct)})` : ""}</dd></dl>`;
+    if (d.history.length >= 3) html += `<div id="hist-chart" style="margin-top:10px"></div>`;
+  } else {
+    html += `<p class="small muted" style="margin-top:14px">FinOrganizer records your portfolio's value each day you open this page, so a value-over-time chart builds up here.</p>`;
+  }
+  return html + `</div>`;
+}
+
+function holdingsTable(d, { compact = false } = {}) {
+  if (!d.holdings.length) {
+    return `<div class="empty">No holdings yet. <strong>Import positions</strong> from your brokerage's website, or <strong>add a holding</strong> by hand.</div>`;
+  }
+  const byAccount = {};
+  d.holdings.forEach((h) => (byAccount[h.account_name] = byAccount[h.account_name] || []).push(h));
+  const head = `<thead><tr><th>Holding</th>${compact ? "" : "<th>Class</th><th class=\"num\">Shares</th><th class=\"num\">Price</th>"}<th class="num">Value</th>
+    ${compact ? "" : "<th class=\"num\">Today</th><th class=\"num\">Cost</th>"}<th class="num">Gain</th><th class="num">Share</th>${compact ? "" : "<th></th>"}</tr></thead>`;
+  const body = Object.entries(byAccount).map(([name, hs]) => {
+    const acct = d.accounts.find((a) => a.name === name) || {};
+    return `<tr class="group-row"><th colspan="${compact ? 4 : 10}">${esc(name)} <span class="muted small">${titleCase(acct.type || "")}</span></th></tr>` +
+      hs.map((h) => `<tr data-id="${h.id ?? ""}">
+        <td><strong>${esc(h.symbol || "")}</strong> <span class="${h.symbol ? "muted small" : ""}">${esc(h.name)}</span>
+          ${h.source === "bank" ? '<span class="pill info">bank</span>' : ""}${h.expense_ratio != null && h.expense_ratio >= 0.5 ? ` <span class="pill warn">${h.expense_ratio}% fee</span>` : ""}</td>
+        ${compact ? "" : `<td class="small">${esc(h.asset_class_label)}</td><td class="num">${h.shares ? +h.shares.toFixed(4) : ""}</td>
+        <td class="num">${h.price != null && h.shares ? money(Math.round(h.price * 100)) : ""}</td>`}
+        <td class="num">${money(h.value_cents)}</td>
+        ${compact ? "" : `<td class="num ${gainClass(h.day_change_cents)}">${h.day_change_cents != null ? signedMoney(h.day_change_cents) : ""}</td>
+        <td class="num">${h.cost_basis_cents != null ? money(h.cost_basis_cents) : '<span class="muted">–</span>'}</td>`}
+        <td class="num ${gainClass(h.gain_cents)}">${h.gain_cents != null ? `${signedMoney(h.gain_cents)}<br><span class="small">${signedPct(h.gain_pct)}</span>` : '<span class="muted">–</span>'}</td>
+        <td class="num">${h.weight.toFixed(1)}%</td>
+        ${compact ? "" : `<td class="actions">${h.id ? `<button class="link edit">Edit</button><button class="link danger del">Delete</button>` : ""}</td>`}
+      </tr>`).join("");
+  }).join("");
+  return `<div class="table-wrap"><table class="holdings">${head}<tbody>${body}</tbody></table></div>`;
+}
+
+pages.investments = async (params) => {
+  const tab = params.get("tab") || "overview";
+  const tabs = { overview: "Overview", holdings: "Holdings", suggestions: "Suggestions", market: "Market" };
+  const hash = location.hash;
+  view.innerHTML = `<div class="page-head"><h1>Investments</h1>
+      <span class="muted small" id="price-status"></span>
+      <button class="ghost" id="refresh-prices" hidden>Refresh prices</button>
+      <button class="ghost" id="import-pos">Import positions</button><button id="add-holding">+ Holding</button></div>
+    <div class="tabs">${Object.entries(tabs).map(([k, v]) => `<button data-tab="${k}" class="${k === tab ? "active" : ""}">${v}</button>`).join("")}</div>
+    <div id="invest"></div>`;
+  $$(".tabs button").forEach((b) => (b.onclick = () => (location.hash = `investments?tab=${b.dataset.tab}`)));
+  const box = $("#invest");
+  const reload = async ({ live = false } = {}) => { await loadInvestments({ live }); if (location.hash === hash) await route(); };
+  $("#add-holding").onclick = async () => { if (await editHolding(null, investState.data || await loadInvestments())) reload({ live: true }); };
+  $("#import-pos").onclick = async () => { if (await importPositions()) reload({ live: true }); };
+
+  if (tab === "market") return renderMarket(box);
+
+  // Saved data is quick to load (no download), so always start from it.
+  const d = investState.fresh ? investState.data : await loadInvestments();
+  investState.fresh = false;
+  const status = $("#price-status"), refreshBtn = $("#refresh-prices");
+  if (d.market_available && d.holdings.some((h) => h.symbol)) {
+    refreshBtn.hidden = false;
+    refreshBtn.onclick = () => { refreshBtn.disabled = true; status.textContent = "Updating prices…"; reload({ live: true }); };
+  }
+  if (investState.loading) status.textContent = "Updating prices…";
+  else if (d.live) status.textContent = d.price_errors.length ? `Prices updated, with problems: ${d.price_errors.join("; ")}` : "Prices up to date";
+  else if (investState.error) status.textContent = `Couldn't update prices: ${investState.error}`;
+
+  // Then fetch live prices in the background and redraw when they arrive.
+  if (d.market_available && !investState.loading && Date.now() - investState.liveAt > LIVE_REFRESH_MS) {
+    investState.loading = loadInvestments({ live: true })
+      .then(() => { investState.error = null; })
+      .catch((e) => { investState.liveAt = Date.now(); investState.error = e.message; })
+      .finally(() => { investState.loading = null; if (location.hash === hash) route(); });
+    status.textContent = "Updating prices…";
+  }
+
+  if (tab === "overview") renderInvestOverview(box, d);
+  if (tab === "holdings") renderHoldings(box, d, reload);
+  if (tab === "suggestions") renderSuggestions(box, d, reload);
+};
+
+function renderInvestOverview(box, d) {
+  if (!d.accounts.length) {
+    box.innerHTML = `<div class="card empty"><h2>Track your investments</h2>
+      <p>Add your brokerage and retirement accounts on the <a href="#accounts">Accounts</a> page (type <em>Investment</em> or <em>Retirement</em>),
+      or link them through a bank connection. Then import their positions or add holdings here to see performance, your asset mix and suggestions.</p></div>`;
+    return;
+  }
+  box.innerHTML = `<div class="tiles">
+      <div class="card tile"><div class="label">Portfolio value</div><div class="value">${money(d.total_cents, { whole: true })}</div>
+        <div class="sub">${d.accounts.length} account${d.accounts.length === 1 ? "" : "s"} · ${d.holdings.length} holding${d.holdings.length === 1 ? "" : "s"}</div></div>
+      <div class="card tile"><div class="label">Today</div><div class="value ${gainClass(d.day_change_cents)}">${d.day_change_cents != null ? signedMoney(d.day_change_cents) : "–"}</div>
+        <div class="sub">${d.day_change_cents != null && d.total_cents ? signedPct(100 * d.day_change_cents / (d.total_cents - d.day_change_cents), 2) : d.live ? "markets closed or no prices" : "needs live prices"}</div></div>
+      <div class="card tile"><div class="label">Total gain</div><div class="value ${gainClass(d.gain_cents)}">${d.gain_cents != null ? signedMoney(d.gain_cents) : "–"}</div>
+        <div class="sub">${d.gain_cents != null ? `${signedPct(d.gain_pct)} on ${money(d.cost_cents, { whole: true })} cost${d.cost_coverage < 99 ? ` · ${d.cost_coverage.toFixed(0)}% of holdings have a cost basis` : ""}` : "add cost basis to see gains"}</div></div>
+      <div class="card tile"><div class="label">Invested, last 12 months</div><div class="value">${money(d.invested_year_cents, { whole: true })}</div><div class="sub">moved from your other accounts</div></div>
+    </div>
+    <div class="grid invest-grid">
+      ${performanceCard(d)}
+      <div class="stack">
+        <div class="card"><h2>Asset mix</h2>${allocationBars(d)}
+          <p class="small muted" style="margin-bottom:0">Target for you: about ${d.target_stock_percent}% stocks. <a href="#investments?tab=suggestions">Details</a></p></div>
+        <div class="card"><h2>Top suggestions <a class="small" href="#investments?tab=suggestions">all</a></h2>${suggestionList(d.suggestions.filter((s) => s.level !== "good"), 3)}</div>
+      </div>
+      <div class="card" style="grid-column:1/-1"><h2>Accounts</h2><table><tbody>${d.accounts.map((a) => `<tr>
+        <td><a href="#transactions?account_id=${a.id}">${esc(a.name)}</a> <span class="muted small">${titleCase(a.type)}${a.institution ? ` · ${esc(a.institution)}` : ""}</span>
+          ${a.uses_balance ? '<span class="pill">balance only</span>' : ""}</td>
+        <td class="num">${a.cost_cents != null && !a.uses_balance ? `<span class="${gainClass(a.value_cents - a.cost_cents)} small">${signedMoney(a.value_cents - a.cost_cents)}</span>` : ""}</td>
+        ${moneyCell(a.value_cents)}</tr>`).join("")}</tbody></table></div>
+    </div>`;
+  const pc = $("#perf-chart");
+  if (pc && d.past_year) pc.append(pctLineChart(d.past_year.points.map((p) => ({ label: shortDate(p.date), tip: longDate(p.date), you: p.portfolio_pct, bench: p.benchmark_pct })),
+    [{ key: "you", label: "Your holdings", color: "var(--series-1)" }, { key: "bench", label: d.past_year.benchmark, color: "var(--series-2)" }], { width: pc.clientWidth }));
+  const hc = $("#hist-chart");
+  if (hc) hc.append(lineChart(d.history.map((h) => ({ label: shortDate(h.date), tip: longDate(h.date), value: h.value_cents })), { valueLabel: "Portfolio", width: hc.clientWidth, height: 180 }));
+}
+
+function renderHoldings(box, d, reload) {
+  box.innerHTML = `<div class="card">${holdingsTable(d)}
+    <p class="small muted" style="margin-bottom:0">Values update from live prices when you're online. Holdings marked <span class="pill info">bank</span> come from your bank connection and refresh when it syncs; editing one keeps your version.</p></div>`;
+  $$("table.holdings tr[data-id]").forEach((tr) => {
+    const h = d.holdings.find((x) => String(x.id) === tr.dataset.id);
+    if (!h || !h.id) return;
+    $(".edit", tr).onclick = async () => { if (await editHolding(h, d)) reload({ live: true }); };
+    $(".del", tr).onclick = async () => {
+      if (await confirmDialog(`Delete ${h.symbol || h.name} from ${h.account_name}?`)) {
+        await attempt(() => api("DELETE", `/api/holdings/${h.id}`), "Deleted");
+        reload();
+      }
+    };
+  });
+}
+
+function renderSuggestions(box, d, reload) {
+  const p = d.profile;
+  box.innerHTML = `<div class="grid invest-grid">
+      <div class="card" style="grid-column:1/-1">${suggestionList(d.suggestions)}
+        <p class="small muted" style="margin-bottom:0">${esc(d.disclaimer)}</p></div>
+      <div class="card"><h2>About you</h2><p class="small muted" style="margin-top:0">Used to pick a target stock/bond mix. Stays on this device.</p>
+        <form id="prof" class="form-grid">
+          <label class="field">Age<input name="age" inputmode="numeric" value="${p.age ?? ""}" placeholder="e.g. 40"></label>
+          <label class="field">Comfort with ups and downs<select name="risk">${[["conservative", "Low: I'd rather grow slowly"], ["moderate", "Medium"], ["aggressive", "High: I won't need this for decades"]]
+            .map(([k, l]) => `<option value="${k}" ${p.risk === k ? "selected" : ""}>${l}</option>`).join("")}</select></label>
+          <button>Save</button></form>
+        <p class="small" style="margin-bottom:0">Target: about <strong>${d.target_stock_percent}% stocks</strong> and ${100 - d.target_stock_percent}% bonds and cash
+          (rule of thumb: 110 minus your age, adjusted for comfort with risk).</p></div>
+      <div class="card"><h2>Asset mix</h2>${allocationBars(d)}</div>
+    </div>`;
+  $("#prof").onsubmit = async (e) => {
+    e.preventDefault();
+    const v = formVals(e.target);
+    await attempt(() => api("PUT", "/api/investments/profile", { age: v.age.trim(), risk: v.risk }), "Saved");
+    reload();
+  };
+}
+
+async function renderMarket(box) {
+  box.innerHTML = `<div class="card muted">Loading market data…</div>`;
+  let m;
+  try {
+    m = await GET("/api/market");
+  } catch (e) {
+    box.innerHTML = `<div class="card empty">${esc(e.message)}.</div>`;
+    return;
+  }
+  const cell = (v, rate) => `<td class="num ${gainClass(v)}">${v === null || v === undefined ? "–" : rate ? `${v >= 0 ? "+" : ""}${v.toFixed(2)} pts` : signedPct(v)}</td>`;
+  box.innerHTML = `<div class="grid invest-grid">
+    <div class="card" style="grid-column:1/-1"><h2>Markets</h2><div class="table-wrap"><table>
+      <thead><tr><th>Index</th><th class="num">Latest</th><th class="num">Day</th><th class="num">1 month</th><th class="num">This year</th><th class="num">1 year</th><th>3 months</th></tr></thead>
+      <tbody>${m.items.map((i) => `<tr><td><strong>${esc(i.label)}</strong><br><span class="muted small">${esc(i.about)}</span></td>
+        <td class="num">${i.is_rate ? `${i.price.toFixed(2)}%` : i.price.toLocaleString(undefined, { maximumFractionDigits: 2, minimumFractionDigits: 2 })}</td>
+        ${cell(i.day, i.is_rate)}${cell(i.month, i.is_rate)}${cell(i.ytd, i.is_rate)}${cell(i.year, i.is_rate)}
+        <td>${sparkline(i.spark, i.spark.length < 2 || i.spark[i.spark.length - 1] >= i.spark[0])}</td></tr>`).join("")}</tbody></table></div>
+      <p class="small muted" style="margin-bottom:0">Prices from Yahoo Finance, delayed up to 15 minutes${m.items[0] ? `, as of ${esc(longDate(m.items[0].as_of))}` : ""}.
+        ${m.errors.length ? `Some couldn't be loaded: ${esc(m.errors.join("; "))}.` : ""}</p></div>
+    <div class="card"><h2>What it means</h2>${m.notes.length ? m.notes.map((n) => `<div class="insight info"><span class="icon">i</span><span>${esc(n)}</span></div>`).join("") : '<div class="muted">Nothing notable.</div>'}</div>
+    <div class="card"><h2>Keep in mind</h2><ul class="small" style="padding-left:18px;margin:0;display:grid;gap:6px">
+      <li>Day-to-day moves are noise for long-term money. Over 20-year periods, US stocks have historically come out ahead despite many crashes along the way.</li>
+      <li>Trying to time the market (selling before drops, buying back before rises) usually costs more than it saves; many of the best days come right after the worst.</li>
+      <li>Rebalancing once or twice a year back to your target mix makes you sell some of what went up and buy what went down, automatically.</li>
+    </ul></div></div>`;
+}
+
 // ---------------------------------------------------------------------- router
 
 async function route() {

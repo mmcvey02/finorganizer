@@ -3,7 +3,7 @@
 import datetime as dt
 import random
 
-from . import ledger as L
+from . import investments, ledger as L
 from .money import add_months, month_of, today
 
 
@@ -21,7 +21,7 @@ def load_sample_data(conn, months=6, seed=42):
     checking = L.add_account(conn, "Everyday Checking", "checking", 2_450_00, "First Bank")
     savings = L.add_account(conn, "High-Yield Savings", "savings", 8_000_00, "First Bank", 4.2)
     card = L.add_account(conn, "Rewards Visa", "credit_card", -640_00, "CardCo", 22.9)
-    L.add_account(conn, "401(k)", "retirement", 42_300_00, "Fidelity")
+    k401 = L.add_account(conn, "401(k)", "retirement", 42_300_00, "Fidelity")
     L.add_account(conn, "Car Loan", "loan", -11_800_00, "Auto Credit", 6.4)
 
     def tx(acct, date, amount, payee, cat):
@@ -92,3 +92,12 @@ def load_sample_data(conn, months=6, seed=42):
                     _cat(conn, "Insurance"), "SafeDrive Insurance")
     L.add_recurring(conn, "Domain renewal", card, -18_00, "yearly", add_months(end, 2),
                     _cat(conn, "Subscriptions"), "Registrar")
+
+    # What the 401(k) holds (adds up to its balance), for the Investments page.
+    for sym, name, shares, value, cost, er in [
+            ("FXAIX", "Fidelity 500 Index Fund", 112.0, 24_480_00, 19_900_00, 0.015),
+            ("FTIHX", "Fidelity Total International Index Fund", 610.0, 9_350_00, 8_700_00, 0.06),
+            ("FXNAX", "Fidelity US Bond Index Fund", 805.0, 8_470_00, 8_900_00, 0.025)]:
+        investments.add_holding(conn, k401, sym, name, shares, value, cost, expense_ratio=er, commit=False)
+    conn.commit()
+

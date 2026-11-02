@@ -288,3 +288,18 @@ input.switch:disabled { opacity: 0.6; }
 .unmatched:first-of-type { border-top: 0; }
 .unmatched-head { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; }
 .unmatched .link-match { margin: 4px 4px 0 0; font-size: 13px; }
+
+/* investments */
+.alloc-stack { display: flex; height: 14px; border-radius: 7px; overflow: hidden; background: var(--surface-2); gap: 2px; }
+.alloc-stack span { display: block; height: 100%; min-width: 2px; }
+.legend-row.static { cursor: default; }
+.legend-row.static:hover { background: transparent; }
+table.holdings tr.group-row th { background: var(--surface-2); color: var(--text); font-size: 13px; }
+table.holdings tr.group-row:hover { background: transparent; }
+svg.spark { display: block; }
+#price-status { margin-left: auto; }
+.page-head #price-status + button, .page-head #price-status:empty + button { margin-left: 0; }
+.invest-grid { grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); align-items: start; }
+@media (max-width: 860px) { .invest-grid { grid-template-columns: minmax(0, 1fr); } }
+.perf-stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-bottom: 10px; }
+.perf-stats .value { font-size: 20px; }

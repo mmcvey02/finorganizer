@@ -400,6 +400,65 @@ def cmd_export(conn, a):
         sys.stdout.write(text)
 
 
+def cmd_invest(conn, a):
+    from . import investments as I, market as M
+    if a.action == "add":
+        acct = L.find_account(conn, a.account)
+        hid = I.add_holding(conn, acct["id"], a.symbol, a.name or "", a.shares,
+                            to_cents(a.value) if a.value else None,
+                            to_cents(a.cost) if a.cost else None, a.price, expense_ratio=a.fee)
+        print("Added holding #%d to %s" % (hid, acct["name"]))
+    elif a.action == "import":
+        acct = L.find_account(conn, a.account)
+        with open(a.file, encoding="utf-8-sig") as f:
+            r = I.import_positions(conn, acct["id"], f.read())
+        print("Imported %d holdings worth %s into %s." % (r["imported"], fmt(r["value_cents"]), acct["name"]))
+    elif a.action == "delete":
+        I.delete_holding(conn, a.id)
+        print("Deleted.")
+    elif a.action == "profile":
+        p = I.set_profile(conn, a.age, a.risk)
+        print("Age %s, %s risk: target about %d%% stocks." % (p["age"] or "not set", p["risk"],
+                                                            I.target_stock_percent(p)))
+    elif a.action == "market":
+        data = M.overview()
+        if not data["items"]:
+            sys.exit("error: %s" % ((data["errors"] or ["couldn't load market data"])[0]))
+        signed = lambda v, rate=False: "n/a" if v is None else ("%+.2f pts" % v if rate else "%+.1f%%" % v)
+        table(data["items"], [("Index", "label", "<"), ("Latest", lambda r: "%.2f" % r["price"], ">"),
+                              ("Day", lambda r: signed(r["day"], r["is_rate"]), ">"),
+                              ("1 month", lambda r: signed(r["month"], r["is_rate"]), ">"),
+                              ("This year", lambda r: signed(r["ytd"], r["is_rate"]), ">"),
+                              ("1 year", lambda r: signed(r["year"], r["is_rate"]), ">")])
+        for n in data["notes"]:
+            print("- " + n)
+    else:
+        quotes = {}
+        if a.live:
+            quotes, errors = M.charts(I.symbols_to_price(conn) + [M.BENCHMARK])
+            I.apply_prices(conn, quotes)
+            for e in sorted(set(errors.values())):
+                print("price problem: " + e)
+        p = I.portfolio(conn, quotes)
+        table(p["holdings"], [("ID", "id", ">"), ("Account", "account_name", "<"), ("Symbol", "symbol", "<"),
+                              ("Name", lambda r: r["name"][:32], "<"), ("Class", "asset_class_label", "<"),
+                              ("Value", money("value_cents"), ">"), ("Gain", money("gain_cents"), ">"),
+                              ("Share", lambda r: pct(r["weight"]), ">")])
+        print()
+        kv([("Portfolio value", fmt(p["total_cents"])),
+            ("Total gain", "%s (%s)" % (fmt(p["gain_cents"]), pct(p["gain_pct"])) if p["gain_cents"] is not None else "n/a"),
+            ("Asset mix", ", ".join("%s %.0f%%" % (x["label"], x["percent"]) for x in p["allocation"]) or "n/a")]
+           + ([("Past year", "your holdings %+.1f%%, S&P 500 %+.1f%%" % (p["past_year"]["portfolio_pct"],
+                                                                        p["past_year"]["benchmark_pct"]))]
+              if p["past_year"] else []))
+        if a.action == "suggest" or not p["holdings"]:
+            print("\nSuggestions:")
+            for s in p["suggestions"]:
+                print("  [%s] %s\n      %s" % ({"warning": "!", "info": "i", "good": "ok"}[s["level"]],
+                                               s["title"], s["message"]))
+            print("\n" + p["disclaimer"])
+
+
 def cmd_dashboard(conn, a):
     print(json.dumps(reports.dashboard(conn, a.month), indent=2))
 
@@ -620,6 +679,32 @@ def build_parser():
     s.add_argument("--end")
     s.set_defaults(fn=cmd_export)
 
+    s = sub.add_parser("invest", help="investment holdings, performance, suggestions and market data")
+    ss = s.add_subparsers(dest="action")
+    x = ss.add_parser("list", help="holdings and portfolio summary (the default)")
+    x.add_argument("--live", action="store_true", help="update prices from the internet first")
+    x = ss.add_parser("suggest", help="summary plus suggestions for improving the portfolio")
+    x.add_argument("--live", action="store_true", help="update prices from the internet first")
+    x = ss.add_parser("add", help="add a holding by hand")
+    x.add_argument("account")
+    x.add_argument("symbol")
+    x.add_argument("--name")
+    x.add_argument("--shares", type=float, default=0.0)
+    x.add_argument("--price", type=float, help="price per share")
+    x.add_argument("--value", help="current value (or give --shares and --price)")
+    x.add_argument("--cost", help="cost basis: total amount paid")
+    x.add_argument("--fee", type=float, help="expense ratio, percent per year")
+    x = ss.add_parser("import", help="import a positions CSV from your brokerage")
+    x.add_argument("account")
+    x.add_argument("file")
+    x = ss.add_parser("delete")
+    x.add_argument("id", type=int)
+    x = ss.add_parser("profile", help="your age and risk tolerance, for the target mix")
+    x.add_argument("--age", type=int)
+    x.add_argument("--risk", choices=("conservative", "moderate", "aggressive"))
+    ss.add_parser("market", help="major indexes, rates and what they mean")
+    s.set_defaults(fn=cmd_invest, live=False)
+
     s = sub.add_parser("dashboard", help="dashboard data as JSON")
     s.add_argument("--month")
     s.set_defaults(fn=cmd_dashboard)
@@ -629,6 +714,7 @@ def build_parser():
 def main(argv=None):
     args = build_parser().parse_args(argv)
     from .banksync import SyncError
+    from .market import MarketError
     from .profiles import Profiles
     try:
         args.profiles = Profiles(args.db)
@@ -639,7 +725,7 @@ def main(argv=None):
         sys.exit("error: %s" % e)
     try:
         args.fn(conn, args)
-    except (ValueError, LookupError, ArithmeticError, sqlite3.Error, SyncError) as e:
+    except (ValueError, LookupError, ArithmeticError, sqlite3.Error, SyncError, MarketError) as e:
         sys.exit("error: %s" % e)
     except BrokenPipeError:  # output piped into e.g. `head`, which stopped reading
         sys.stderr.close()
