@@ -303,3 +303,6 @@ svg.spark { display: block; }
 @media (max-width: 860px) { .invest-grid { grid-template-columns: minmax(0, 1fr); } }
 .perf-stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-bottom: 10px; }
 .perf-stats .value { font-size: 20px; }
+.value-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: flex-end; gap: 10px; margin-bottom: 10px; }
+.value-now { font-size: 26px; font-weight: 650; font-variant-numeric: tabular-nums; }
+.value-change { font-size: 15px; font-weight: 600; margin-left: 6px; }

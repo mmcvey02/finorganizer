@@ -264,6 +264,46 @@ class PortfolioTests(unittest.TestCase):
         self.assertIsNone(I.get_profile(self.c)["age"])
 
 
+class ValueHistoryTests(unittest.TestCase):
+    """The "Portfolio value" chart at the top of the Overview."""
+
+    def setUp(self):
+        M.clear_cache()
+        self.c = db.connect(":memory:")
+        self.chk = L.add_account(self.c, "Checking", "checking", 2000000)
+        self.brk = L.add_account(self.c, "Schwab Brokerage", "investment", 0)
+        I.import_positions(self.c, self.brk, SCHWAB_CSV)
+
+    def test_from_prices(self):
+        found, _ = M.charts(I.symbols_to_price(self.c) + [M.BENCHMARK], fetch=FakeMarket())
+        vh = I.portfolio(self.c, found, today=TODAY)["value_history"]
+        self.assertEqual((vh["source"], vh["daily"]), ("prices", True))
+        self.assertEqual(vh["points"][-1]["value_cents"], 2100000)  # ends at today's value
+        self.assertEqual(vh["points"][0]["value_cents"], 1750000)   # a year ago, same holdings
+        self.assertEqual(len(vh["points"]), 260)
+
+    def test_from_money_moved_in_and_out(self):
+        for month in range(1, 11):
+            L.add_transfer(self.c, self.chk, self.brk, "2026-%02d-15" % month, 50000)
+        vh = I.portfolio(self.c, today=TODAY)["value_history"]
+        self.assertEqual((vh["source"], vh["daily"]), ("transactions", False))
+        pts = {p["date"]: p["value_cents"] for p in vh["points"]}
+        self.assertEqual(pts["2025-11-30"], 2100000 - 500000)  # before all ten deposits
+        self.assertEqual(pts["2026-05-31"], 2100000 - 250000)  # five still to come
+        self.assertEqual(pts[TODAY.isoformat()], 2100000)
+        self.assertEqual(len(vh["points"]), 13)
+
+    def test_from_recorded_values(self):
+        for day in range(1, 9):
+            I.portfolio(self.c, today=dt.date(2026, 10, day))
+        vh = I.portfolio(self.c, today=TODAY)["value_history"]
+        self.assertEqual((vh["source"], len(vh["points"])), ("recorded", 9))
+
+    def test_nothing_to_show_yet(self):
+        vh = I.portfolio(self.c, today=TODAY)["value_history"]
+        self.assertEqual((vh["source"], vh["points"]), ("none", []))
+
+
 class SuggestionTests(unittest.TestCase):
     def setUp(self):
         self.c = db.connect(":memory:")
