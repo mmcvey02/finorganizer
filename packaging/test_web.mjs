@@ -19,6 +19,30 @@ for (const f of JSON.parse(/const FILES = (\[.*\]);/.exec(sw)[1])) {
   if (f !== "./" && !fs.existsSync(path.join(site, f))) fail("service worker lists missing file " + f);
 }
 
+// The service worker shows notifications pushed by the computer, and opens the right page.
+{
+  const listeners = {}, shown = [], opened = [];
+  const self = {
+    addEventListener: (type, fn) => (listeners[type] = fn),
+    registration: { scope: "https://example.github.io/finorganizer/", showNotification: async (title, o) => shown.push({ title, ...o }) },
+    clients: { matchAll: async () => [], openWindow: async (url) => opened.push(url) },
+    skipWaiting: () => {},
+  };
+  new Function("self", "caches", "location", sw)(self, {}, { origin: "https://example.github.io" });
+  const wait = [];
+  const push = (data) => listeners.push({ data: { json: () => JSON.parse(data), text: () => data }, waitUntil: (p) => wait.push(p) });
+  push(JSON.stringify({ title: "Bill due tomorrow: Rent", body: "$1,500.00", url: "#recurring", tag: "bill:1" }));
+  push("not json");
+  push(JSON.stringify({ title: "Odd", url: "javascript:alert(1)" }));
+  await Promise.all(wait);
+  if (shown.length !== 3 || shown[0].title !== "Bill due tomorrow: Rent" || shown[0].data.url !== "#recurring" ||
+      shown[1].title !== "FinOrganizer" || shown[2].data.url !== "") fail("push handler: " + JSON.stringify(shown));
+  const clicks = [];
+  listeners.notificationclick({ notification: { data: { url: "#budgets" }, close: () => {} }, waitUntil: (p) => clicks.push(p) });
+  await Promise.all(clicks);
+  if (opened[0] !== "https://example.github.io/finorganizer/#budgets") fail("notification click opened " + opened[0]);
+}
+
 const py = await loadPyodide({ indexURL: path.join(site, "pyodide") + path.sep });
 py.unpackArchive(new Uint8Array(fs.readFileSync(path.join(site, "finorganizer.zip"))), "zip", { extractDir: "/app" });
 py.runPython(`import sys; sys.path.insert(0, "/app")`);

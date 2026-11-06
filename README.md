@@ -148,6 +148,41 @@ The connection's access key is stored in your profile's data file, so protect th
 your other financial records; removing the connection in the app (or revoking it on the
 SimpleFIN site) cuts off access.
 
+## Notifications
+
+FinOrganizer can alert you by **email** and on your **iPhone** (notifications from the
+FinOrganizer Home Screen app). Turn them on per profile in ⚙ Settings → Notifications and
+choose what to hear about:
+
+- **Bills due soon** (a few days before, and when overdue)
+- **Budget alerts** at 80% and when a category goes over
+- **Unusual activity**: large purchases, low balances, bank sync problems, transfers missing
+  their other side
+- **Weekly summary** on Mondays
+
+Each alert is sent once, and nothing is sent at night (10 pm – 7 am) unless you turn that off.
+
+**How it works.** FinOrganizer on your computer does the checking and sending: the Windows
+and Mac apps set up a small background check that runs every 4 hours, even when FinOrganizer
+is closed (the computer just needs to be on). It syncs your banks first when they're due.
+Running from source, checks happen while the app is open (or run `finorganizer notify run`).
+
+**Email.** Use your own email account. Gmail, iCloud and Yahoo need an *app password* (not your
+normal password): Gmail: Google Account → Security → 2-Step Verification → App passwords;
+iCloud: account.apple.com → Sign-In and Security → App-Specific Passwords. The password is kept
+in the profile's data file on your computer, like your bank connection.
+
+**iPhone** (iOS 16.4 or later):
+1. Add FinOrganizer to your Home Screen (see "iPhone app" above) and open it from there.
+2. ⚙ Settings → Notifications → **Turn on notifications**, and allow them.
+3. Tap **Share code** and send it to your computer (AirDrop, Messages, Mail, Notes).
+4. On the computer: ⚙ Settings → Notifications → **Add an iPhone**, paste the code. A test
+   notification arrives right away.
+
+Messages are encrypted on your computer for your phone (Web Push), so Apple's push service only
+passes them along. Notifications go to the phone even though its own copy of FinOrganizer keeps
+separate data.
+
 ## Investments
 
 The **Investments** page shows your brokerage and retirement accounts in one place:
@@ -294,6 +329,9 @@ finorganizer/
   desktop.py   desktop app: native window via pywebview; closing it quits
   updater.py   checks GitHub Releases and installs updates in the Windows app
   backup.py    one-file backups of a profile, and restoring them
+  notify.py    notifications: alerts, email, sending each once, quiet hours
+  webpush.py   encrypted iPhone notifications (Web Push)
+  schedule.py  the background check (Task Scheduler / launchd)
   webapp.py    entry point for the iPhone / web version (runs on Pyodide)
   server.py    local JSON API + static file server (standard library only)
   cli.py       command-line interface

@@ -41,6 +41,7 @@ TARGETS = {
         "--collect-all", "webview",
         "--hidden-import", "truststore",
         "--hidden-import", "certifi",
+        "--hidden-import", "cryptography.hazmat.primitives.ciphers.aead",  # iPhone notifications
     ] + (
         # macOS: a normal .app bundle (one-file .apps are deprecated by PyInstaller).
         ["--onedir", "--osx-bundle-identifier", "io.github.mmcvey02.finorganizer"]

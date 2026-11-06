@@ -459,6 +459,30 @@ def cmd_invest(conn, a):
             print("\n" + p["disclaimer"])
 
 
+def cmd_notify(conn, a):
+    from . import notify
+    if a.action == "run":
+        r = notify.run(conn, ignore_quiet=a.now, sync_banks=True)
+        print("Status: %s" % r["status"])
+        for title in r["sent"]:
+            print("  sent: %s" % title)
+        if r.get("waiting"):
+            print("  %d alert(s) waiting (%s)" % (r["waiting"], {"quiet": "quiet hours; use --now to send anyway",
+                                                               "no_channel": "no email or iPhone set up"}.get(r["status"], "will retry")))
+        for e in r["errors"]:
+            print("  problem: %s" % e)
+    elif a.action == "test":
+        notify.send_test(conn, a.channel)
+        print("Test %s sent." % a.channel)
+    else:
+        state = notify.public_state(conn)
+        cfg = state["config"]
+        print("Notifications: %s" % ("on" if cfg["enabled"] else "off"))
+        print("Email: %s" % (cfg["email"]["to"] if cfg["email"]["enabled"] else "off"))
+        print("iPhones: %s" % (", ".join(d["name"] for d in state["devices"]) or "none"))
+        print("Last check: %s" % (state["last_run"] or "never"))
+
+
 def cmd_dashboard(conn, a):
     print(json.dumps(reports.dashboard(conn, a.month), indent=2))
 
@@ -704,6 +728,15 @@ def build_parser():
     x.add_argument("--risk", choices=("conservative", "moderate", "aggressive"))
     ss.add_parser("market", help="major indexes, rates and what they mean")
     s.set_defaults(fn=cmd_invest, live=False)
+
+    s = sub.add_parser("notify", help="notifications: check now, send a test, or show status")
+    ss = s.add_subparsers(dest="action", required=True)
+    x = ss.add_parser("run", help="check this profile and send what's due")
+    x.add_argument("--now", action="store_true", help="send even during quiet hours")
+    x = ss.add_parser("test", help="send a test notification")
+    x.add_argument("channel", choices=("email", "push"))
+    ss.add_parser("status")
+    s.set_defaults(fn=cmd_notify)
 
     s = sub.add_parser("dashboard", help="dashboard data as JSON")
     s.add_argument("--month")

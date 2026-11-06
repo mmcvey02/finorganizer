@@ -32,3 +32,24 @@ self.addEventListener("fetch", (event) => {
     return fetch(req);
   }));
 });
+
+// Notifications sent by FinOrganizer on your computer (see finorganizer/webpush.py).
+self.addEventListener("push", (event) => {
+  let m = {};
+  try { m = event.data ? event.data.json() : {}; } catch (_) { m = { body: event.data ? event.data.text() : "" }; }
+  event.waitUntil(self.registration.showNotification(m.title || "FinOrganizer", {
+    body: m.body || "", tag: m.tag || undefined, icon: "icons/icon-192.png", badge: "icons/icon-192.png",
+    data: { url: typeof m.url === "string" && m.url.startsWith("#") ? m.url : "" },
+  }));
+});
+
+// Tapping one opens the app on the page it's about.
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+  const url = new URL("./" + ((event.notification.data && event.notification.data.url) || ""), self.registration.scope).href;
+  event.waitUntil(self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((wins) => {
+    const win = wins.find((w) => w.url.startsWith(self.registration.scope));
+    if (win) return win.focus().then((w) => (w && w.navigate ? w.navigate(url) : w));
+    return self.clients.openWindow(url);
+  }));
+});

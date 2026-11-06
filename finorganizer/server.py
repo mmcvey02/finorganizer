@@ -15,7 +15,7 @@ import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from . import (backup, banksync, categorize, csvio, db, investments, ledger, market, planning, reports,
+from . import (backup, banksync, categorize, csvio, db, investments, ledger, market, notify, planning, reports,
                sample, summary_page, updater)
 from .db import ACCOUNT_TYPES, CATEGORY_KINDS, FREQUENCIES
 from .profiles import DEFAULT_ID
@@ -284,6 +284,28 @@ def build_router(app=None):
     r.add("POST", "/api/profiles/switch", switch_profile)
     r.add("PUT", r"/api/profiles/([a-z0-9-]+)", lambda c, q, b, pid: need_profiles().rename(str(pid), b.get("name")))
     r.add("DELETE", r"/api/profiles/([a-z0-9-]+)", delete_profile)
+
+    # notifications (per profile)
+    def notifications_state(c):
+        state = notify.public_state(c)
+        state["background"]["error"] = getattr(app, "schedule_error", None) if app else None
+        return state
+
+    def update_notifications(c, q, b):
+        notify.update_config(c, b)
+        if app is not None:
+            app.schedule_error = notify.sync_schedule(app.profiles)
+        return notifications_state(c)
+
+    def profile_name():
+        return app.profile_name if app is not None else ""
+
+    r.add("GET", "/api/notifications", lambda c, q, b: notifications_state(c))
+    r.add("PUT", "/api/notifications", update_notifications)
+    r.add("POST", "/api/notifications/devices", lambda c, q, b: notify.add_device(c, b.get("code")))
+    r.add("DELETE", r"/api/notifications/devices/(d[0-9a-f]+)", lambda c, q, b, i: notify.remove_device(c, i))
+    r.add("POST", "/api/notifications/test", lambda c, q, b: notify.send_test(c, b.get("channel"), profile_name()))
+    r.add("POST", "/api/notifications/run", lambda c, q, b: notify.run(c, profile_name=profile_name(), ignore_quiet=True))
 
     # linked bank connections (SimpleFIN)
     r.add("GET", "/api/connections", lambda c, q, b: banksync.list_connections(c))

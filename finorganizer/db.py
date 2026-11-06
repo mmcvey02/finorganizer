@@ -121,6 +121,12 @@ CREATE TABLE IF NOT EXISTS settings (
     value TEXT
 );
 
+-- Notifications already sent (or being sent), so each alert goes out once.
+CREATE TABLE IF NOT EXISTS notifications_sent (
+    key TEXT PRIMARY KEY,
+    sent_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 -- Linked bank connections (SimpleFIN). access_url embeds read-only credentials.
 CREATE TABLE IF NOT EXISTS connections (
     id INTEGER PRIMARY KEY,

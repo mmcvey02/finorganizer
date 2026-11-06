@@ -1125,6 +1125,8 @@ pages.settings = async () => {
       </label>
     </div>
     <div style="height:16px"></div>
+    <div id="notify-section"></div>
+    <div style="height:16px"></div>
     <div class="card"><h2>Your data</h2>
       <p class="muted">A backup is a single file with everything in the current profile${profileState.profiles.length > 1 ? ` (<strong>${esc(currentProfileName())}</strong>)` : ""}.
         Restore it here or in FinOrganizer on another device to move your data${web() ? ", for example from your computer to this phone" : ", for example to the iPhone version"}.</p>
@@ -1138,6 +1140,8 @@ pages.settings = async () => {
     <div id="profiles-section"></div>`;
   $("#restore-btn").onclick = restoreBackup;
   $("#autocat-toggle").onchange = (e) => setAutoCategorize(e.target);
+  (web() ? renderPhoneNotifications : renderNotifications)($("#notify-section")).catch((e) =>
+    ($("#notify-section").innerHTML = `<div class="card"><h2>Notifications</h2><p class="neg">${esc(e.message)}</p></div>`));
   if (web()) { await renderProfiles($("#profiles-section")); return; }
   const show = (u) => {
     $("#latest-version").textContent = u.latest || "–";
@@ -1175,6 +1179,236 @@ async function setAutoCategorize(box) {
   } finally {
     box.disabled = false;
   }
+}
+
+// ---------------------------------------------------------------- notifications
+
+const EMAIL_PROVIDERS = {
+  gmail: { label: "Gmail", host: "smtp.gmail.com", port: 587, security: "starttls",
+    help: "Use an app password: Google Account → Security → 2-Step Verification → App passwords." },
+  icloud: { label: "iCloud Mail", host: "smtp.mail.me.com", port: 587, security: "starttls",
+    help: "Use an app-specific password from account.apple.com → Sign-In and Security." },
+  yahoo: { label: "Yahoo Mail", host: "smtp.mail.yahoo.com", port: 465, security: "ssl",
+    help: "Use an app password from Yahoo Account Security." },
+  outlook: { label: "Outlook.com", host: "smtp-mail.outlook.com", port: 587, security: "starttls",
+    help: "Outlook.com may require an app password (Microsoft account → Security)." },
+  other: { label: "Other", host: "", port: 587, security: "starttls", help: "Your email provider's SMTP server settings." },
+};
+const providerOf = (host) => Object.keys(EMAIL_PROVIDERS).find((k) => k !== "other" && EMAIL_PROVIDERS[k].host === host) || (host ? "other" : "gmail");
+const whenAgo = (iso) => (iso ? iso.replace("T", " ").slice(0, 16) : "never");
+
+async function renderNotifications(box) {
+  const st = await GET("/api/notifications");
+  const cfg = st.config, e = cfg.email, ev = cfg.events, on = cfg.enabled;
+  const prov = providerOf(e.host);
+  const last = st.last_result;
+  const bg = st.background;
+  const who = profileState.profiles.length > 1 ? ` for <strong>${esc(currentProfileName())}</strong>` : "";
+  box.innerHTML = `<div class="card" id="notify-card"><h2>Notifications</h2>
+    <label class="switch-row"><span><strong>Send notifications${who}</strong>
+      <span class="muted small">Alerts by email and on your iPhone. Each alert is sent once.</span></span>
+      <input type="checkbox" role="switch" class="switch" id="n-enabled" ${on ? "checked" : ""}></label>
+    <div id="n-body" ${on ? "" : "hidden"}>
+      <h3>What to send</h3>
+      <div class="n-events">
+        <label class="check"><input type="checkbox" data-ev="bills" ${ev.bills ? "checked" : ""}> Bills due soon,
+          <input type="number" min="0" max="30" id="n-bill-days" value="${cfg.bill_days}" class="n-num"> days before</label>
+        <label class="check"><input type="checkbox" data-ev="budgets" ${ev.budgets ? "checked" : ""}> Budget alerts (at 80% and when over)</label>
+        <label class="check"><input type="checkbox" data-ev="activity" ${ev.activity ? "checked" : ""}> Unusual activity: purchases over
+          $<input type="number" min="1" step="1" id="n-large" value="${cfg.large_cents / 100}" class="n-num">, balances under
+          $<input type="number" min="0" step="1" id="n-low" value="${cfg.low_balance_cents / 100}" class="n-num">, bank sync problems and transfers missing a side</label>
+        <label class="check"><input type="checkbox" data-ev="weekly" ${ev.weekly ? "checked" : ""}> Weekly summary (Mondays)</label>
+        <label class="check"><input type="checkbox" id="n-quiet" ${cfg.quiet_hours ? "checked" : ""}> Not at night (10 pm – 7 am); alerts wait until morning</label>
+      </div>
+
+      <h3>Email</h3>
+      <label class="check"><input type="checkbox" id="n-email-on" ${e.enabled ? "checked" : ""}> Send alerts by email</label>
+      <form class="form-grid n-email" id="n-email" ${e.enabled ? "" : "hidden"}>
+        <label class="field">Send to<input name="to" type="email" value="${esc(e.to)}" placeholder="you@example.com"></label>
+        <label class="field">Email provider<select name="provider">${Object.entries(EMAIL_PROVIDERS).map(([k, p]) =>
+          `<option value="${k}" ${k === prov ? "selected" : ""}>${p.label}</option>`).join("")}</select></label>
+        <label class="field">Your email login<input name="username" value="${esc(e.username)}" placeholder="you@gmail.com" autocomplete="username"></label>
+        <label class="field">App password<input name="password" type="password" autocomplete="new-password"
+          placeholder="${st.has_password ? "saved (type to change)" : "app password"}"></label>
+        <div class="muted small" id="n-provider-help" style="grid-column:1/-1">${esc(EMAIL_PROVIDERS[prov].help)}</div>
+        <div class="n-custom" style="grid-column:1/-1;display:${prov === "other" ? "grid" : "none"}">
+          <label class="field">Email server (SMTP)<input name="host" value="${esc(e.host)}" placeholder="smtp.example.com"></label>
+          <label class="field">Port<input name="port" type="number" value="${e.port}"></label>
+          <label class="field">Security<select name="security">${["starttls", "ssl"].map((x) =>
+            `<option value="${x}" ${x === e.security ? "selected" : ""}>${x === "ssl" ? "SSL/TLS" : "STARTTLS"}</option>`).join("")}</select></label>
+        </div>
+        <div class="filters" style="grid-column:1/-1">
+          <button type="submit">Save email settings</button>
+          <button type="button" class="ghost" id="n-test-email">Send a test email</button></div>
+      </form>
+
+      <h3>iPhone</h3>
+      ${st.push_available ? "" : '<p class="neg small">iPhone notifications need the FinOrganizer app download (this copy is missing the cryptography package).</p>'}
+      ${st.devices.length ? `<table><tbody>${st.devices.map((d) => `<tr data-dev="${esc(d.id)}"><td><strong>${esc(d.name)}</strong>
+          <span class="muted small">added ${esc(d.added || "")} · ${esc(d.service)}</span></td>
+          <td class="actions"><button class="link danger rm-dev">Remove</button></td></tr>`).join("")}</tbody></table>
+        <label class="check"><input type="checkbox" id="n-push-on" ${cfg.push.enabled ? "checked" : ""}> Send alerts to ${st.devices.length === 1 ? "this iPhone" : "these iPhones"}</label>`
+        : '<p class="muted small">No iPhone yet.</p>'}
+      <details ${st.devices.length ? "" : "open"} class="n-pair"><summary>Add an iPhone</summary>
+        <ol class="small">
+          <li>On the iPhone, open FinOrganizer <strong>from its Home Screen icon</strong> (add it first in Safari: Share → Add to Home Screen).</li>
+          <li>Go to ⚙ Settings → Notifications → <strong>Turn on notifications</strong>, and allow them.</li>
+          <li>Tap <strong>Share code</strong> and send it to this computer (AirDrop, Messages, Mail or Notes), then paste it here.</li>
+        </ol>
+        <textarea id="n-code" rows="3" placeholder="Paste the pairing code (starts with FINPUSH1.)"></textarea>
+        <div class="filters"><button id="n-add-dev">Add iPhone</button>
+          ${st.devices.length ? '<button class="ghost" id="n-test-push">Send a test notification</button>' : ""}</div>
+      </details>
+
+      <h3>When checks happen</h3>
+      ${bg.supported ? `<label class="check"><input type="checkbox" id="n-bg" ${cfg.background ? "checked" : ""}>
+          Check every ${bg.every_hours} hours, even when FinOrganizer is closed (the computer needs to be on)</label>
+          <div class="muted small">${bg.error ? `<span class="neg">${esc(bg.error)}</span>` : cfg.background ? (bg.installed ? "Background check is set up." : "Setting up…") : "Checks happen only while FinOrganizer is open."}</div>`
+        : `<p class="muted small">${esc(bg.reason)}</p>`}
+      <div class="filters" style="margin-top:8px">
+        <span class="muted small">Last check: ${esc(whenAgo(st.last_run))}${last ? ` · ${last.sent.length ? `sent ${last.sent.length}` : last.status === "quiet" ? `${last.waiting} waiting for morning` : last.status === "no_channel" ? "set up email or an iPhone" : "nothing new"}` : ""}</span>
+        <button class="ghost" id="n-run">Check now</button></div>
+      ${last && last.errors.length ? `<div class="insight warning"><span class="icon">!</span><span>${last.errors.map(esc).join("<br>")}</span></div>` : ""}
+    </div></div>`;
+
+  const save = async (changes, msg) => {
+    const r = await attempt(() => api("PUT", "/api/notifications", changes), msg);
+    if (r) renderNotifications(box);
+    return r;
+  };
+  $("#n-enabled", box).onchange = (ev2) => save({ enabled: ev2.target.checked },
+    ev2.target.checked ? "Notifications on" : "Notifications off");
+  if (!on) return;
+  $$("[data-ev]", box).forEach((cb) => (cb.onchange = () => save({ events: { [cb.dataset.ev]: cb.checked } })));
+  $("#n-bill-days", box).onchange = (x) => save({ bill_days: Number(x.target.value) });
+  $("#n-large", box).onchange = (x) => save({ large_cents: toCents(x.target.value) });
+  $("#n-low", box).onchange = (x) => save({ low_balance_cents: toCents(x.target.value) });
+  $("#n-quiet", box).onchange = (x) => save({ quiet_hours: x.target.checked });
+  const bgBox = $("#n-bg", box);
+  if (bgBox) bgBox.onchange = () => save({ background: bgBox.checked });
+  const form = $("#n-email", box);
+  $("#n-email-on", box).onchange = (x) => {
+    form.hidden = !x.target.checked;
+    if (!x.target.checked && e.enabled) save({ email: { enabled: false } }, "Email alerts off");
+  };
+  form.provider.onchange = () => {
+    const p = EMAIL_PROVIDERS[form.provider.value];
+    $("#n-provider-help", box).textContent = p.help;
+    $(".n-custom", box).style.display = form.provider.value === "other" ? "grid" : "none";
+    if (form.provider.value !== "other") { form.host.value = p.host; form.port.value = p.port; form.security.value = p.security; }
+  };
+  const emailBody = () => {
+    const p = EMAIL_PROVIDERS[form.provider.value];
+    const custom = form.provider.value === "other";
+    const body = { email: { enabled: true, to: form.to.value, username: form.username.value,
+      host: custom ? form.host.value : p.host, port: Number(custom ? form.port.value : p.port),
+      security: custom ? form.security.value : p.security } };
+    if (form.password.value) body.password = form.password.value;
+    return body;
+  };
+  form.onsubmit = (x) => { x.preventDefault(); save(emailBody(), "Email settings saved"); };
+  $("#n-test-email", box).onclick = async () => {
+    if (!(await save(emailBody()))) return;
+    toast("Sending a test email…");
+    await attempt(() => api("POST", "/api/notifications/test", { channel: "email" }), `Test email sent to ${form.to.value}`);
+  };
+  const pushOn = $("#n-push-on", box);
+  if (pushOn) pushOn.onchange = () => save({ push: { enabled: pushOn.checked } });
+  $$("tr[data-dev]", box).forEach((tr) => ($(".rm-dev", tr).onclick = async () => {
+    if (await confirmDialog("Stop sending notifications to this iPhone?"))
+      await attempt(() => api("DELETE", `/api/notifications/devices/${tr.dataset.dev}`), "iPhone removed").then(() => renderNotifications(box));
+  }));
+  $("#n-add-dev", box).onclick = async () => {
+    const r = await attempt(() => api("POST", "/api/notifications/devices", { code: $("#n-code", box).value }));
+    if (!r) return;
+    toast(`${r.name} added. Sending a test notification…`);
+    await attempt(() => api("POST", "/api/notifications/test", { channel: "push" }), `Test notification sent to ${r.name}`);
+    renderNotifications(box);
+  };
+  const testPush = $("#n-test-push", box);
+  if (testPush) testPush.onclick = () => attempt(() => api("POST", "/api/notifications/test", { channel: "push" }), "Test notification sent");
+  $("#n-run", box).onclick = async (x) => {
+    x.target.disabled = true; x.target.textContent = "Checking…";
+    const r = await attempt(() => api("POST", "/api/notifications/run"));
+    if (r) toast(r.sent.length ? `Sent ${r.sent.length} alert${r.sent.length === 1 ? "" : "s"}` :
+      r.status === "no_channel" ? "Set up email or an iPhone first" : r.errors.length ? r.errors[0] : "Nothing new to tell you", !!r.errors.length && !r.sent.length);
+    renderNotifications(box);
+  };
+}
+
+// The iPhone app receives notifications; FinOrganizer on your computer sends them.
+async function renderPhoneNotifications(box) {
+  // On iPhone, only the Home Screen app can receive notifications (not a Safari tab).
+  const needsHomeScreen = web().isIOS && !web().standalone;
+  const supported = !needsHomeScreen && "serviceWorker" in navigator && "PushManager" in window && "Notification" in window;
+  const reg = supported ? await navigator.serviceWorker.ready : null;
+  const sub = reg ? await reg.pushManager.getSubscription() : null;
+  const code = sub ? pref("pushCode", "") : "";
+  let inner;
+  if (!supported) {
+    inner = needsHomeScreen
+      ? "<p>To get notifications on this iPhone, open FinOrganizer from your <strong>Home Screen</strong>: in Safari tap Share → <em>Add to Home Screen</em>, then open it from the new icon.</p>"
+      : '<p class="muted">This browser can\'t receive notifications. On iPhone they need iOS 16.4 or later and FinOrganizer opened from the Home Screen.</p>';
+  } else if (sub && code) {
+    inner = `<p><strong>Notifications are on for this iPhone.</strong> If you haven't yet, add it on your computer:
+        FinOrganizer → ⚙ Settings → Notifications → <em>Add an iPhone</em>, and paste this code.</p>
+      <textarea readonly rows="4" id="push-code" class="code">${esc(code)}</textarea>
+      <div class="filters"><button id="push-share">Share code</button><button class="ghost" id="push-copy">Copy</button>
+        <button class="link danger" id="push-off">Turn off</button></div>`;
+  } else {
+    inner = `<p class="muted">Alerts about bills, budgets and unusual activity are sent by FinOrganizer on your computer
+        (it checks a few times a day, even when it's closed). Turn them on here, then add this iPhone on your computer.</p>
+      <button id="push-on">Turn on notifications</button>`;
+  }
+  box.innerHTML = `<div class="card"><h2>Notifications</h2>${inner}</div>`;
+  const onBtn = $("#push-on", box);
+  if (onBtn) onBtn.onclick = async () => {
+    try {
+      if ((await Notification.requestPermission()) !== "granted") {
+        toast("Notifications weren't allowed. You can allow them in the iPhone's Settings → Notifications → FinOrganizer.", true);
+        return;
+      }
+      setPref("pushCode", await subscribeForPush(reg));
+      toast("Notifications on. Now add this iPhone on your computer.");
+    } catch (err) {
+      toast("Couldn't turn on notifications: " + err.message, true);
+    }
+    renderPhoneNotifications(box);
+  };
+  const shareBtn = $("#push-share", box);
+  if (shareBtn) shareBtn.onclick = async () => {
+    if (navigator.share) { try { await navigator.share({ text: code }); } catch (_) { /* closed */ } }
+    else $("#push-copy", box).click();
+  };
+  const copyBtn = $("#push-copy", box);
+  if (copyBtn) copyBtn.onclick = async () => {
+    try { await navigator.clipboard.writeText(code); toast("Code copied"); }
+    catch (_) { $("#push-code", box).select(); toast("Select and copy the code"); }
+  };
+  const offBtn = $("#push-off", box);
+  if (offBtn) offBtn.onclick = async () => {
+    if (!(await confirmDialog("Turn off notifications on this iPhone? Your computer stops being able to reach it."))) return;
+    await sub.unsubscribe().catch(() => {});
+    setPref("pushCode", "");
+    toast("Notifications off on this iPhone");
+    renderPhoneNotifications(box);
+  };
+}
+
+const b64u = (bytes) => btoa(String.fromCharCode(...new Uint8Array(bytes))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+
+// Make a key pair for this phone, subscribe with it, and wrap everything the computer
+// needs to reach the phone into one pairing code (see finorganizer/webpush.py).
+async function subscribeForPush(reg) {
+  const keys = await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, ["sign", "verify"]);
+  const pub = await crypto.subtle.exportKey("raw", keys.publicKey);
+  const jwk = await crypto.subtle.exportKey("jwk", keys.privateKey);
+  const old = await reg.pushManager.getSubscription();
+  if (old) await old.unsubscribe();
+  const sub = (await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: new Uint8Array(pub) })).toJSON();
+  const name = /iPad/.test(navigator.userAgent) ? "iPad" : /iPhone/.test(navigator.userAgent) ? "iPhone" : "Phone";
+  const json = JSON.stringify({ e: sub.endpoint, p: sub.keys.p256dh, a: sub.keys.auth, k: jwk.d, n: name });
+  return "FINPUSH1." + b64u(new TextEncoder().encode(json));
 }
 
 const currentProfileName = () => (profileState.profiles.find((p) => p.id === profileState.current) || {}).name || "Default";

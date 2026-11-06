@@ -20,7 +20,9 @@ jobs:
           python-version: "3.12"
 
       - name: Run tests
-        run: python -m unittest discover -s tests -v
+        run: |
+          python -m pip install cryptography
+          python -m unittest discover -s tests -v
 
       - name: Stamp version
         shell: pwsh
@@ -32,7 +34,7 @@ jobs:
 
       - name: Build FinOrganizer.exe and FinOrganizer-cli.exe
         run: |
-          python -m pip install --upgrade pip pyinstaller pywebview truststore certifi
+          python -m pip install --upgrade pip pyinstaller pywebview truststore certifi cryptography
           python packaging/build_exe.py
 
       - name: Smoke-test the command-line executable
@@ -49,6 +51,20 @@ jobs:
           $api = Invoke-WebRequest http://127.0.0.1:8799/api/accounts -UseBasicParsing
           Stop-Process -Id $p.Id
           if (-not $page.Content.Contains("FinOrganizer") -or $api.StatusCode -ne 200) { exit 1 }
+
+      - name: Test the background notification check (task file and --notify run)
+        shell: pwsh
+        run: |
+          $xml = Join-Path $env:RUNNER_TEMP "task.xml"
+          python -c "from finorganizer import schedule; open(r'$xml', 'w', encoding='utf-16').write(schedule.task_xml([r'C:\Program Files\FinOrganizer.exe', '--notify', '--db', r'C:\data & more\f.db']))"
+          schtasks /Create /F /TN "FinOrganizer CI test" /XML $xml
+          if ($LASTEXITCODE -ne 0) { Write-Error "Task Scheduler rejected the task"; exit 1 }
+          schtasks /Query /TN "FinOrganizer CI test" /V /FO LIST | Select-String "Task To Run|Repeat"
+          schtasks /Delete /F /TN "FinOrganizer CI test"
+          $db = Join-Path $env:RUNNER_TEMP "notify.db"
+          $p = Start-Process dist\FinOrganizer.exe -ArgumentList "--notify", "--db", $db -PassThru
+          if (-not $p.WaitForExit(60000)) { Stop-Process -Id $p.Id -Force; Write-Error "--notify did not exit"; exit 1 }
+          if ($p.ExitCode -ne 0) { Write-Error "--notify failed"; exit 1 }
 
       - name: Smoke-test the desktop app (opens its window, renders, closes, exits)
         shell: pwsh
@@ -116,7 +132,9 @@ jobs:
           python-version: "3.12"
 
       - name: Run tests
-        run: python -m unittest discover -s tests -v
+        run: |
+          python -m pip install cryptography
+          python -m unittest discover -s tests -v
 
       - name: Stamp version
         run: |
@@ -127,7 +145,7 @@ jobs:
 
       - name: Build FinOrganizer.app
         run: |
-          python -m pip install --upgrade pip pyinstaller pywebview truststore certifi
+          python -m pip install --upgrade pip pyinstaller pywebview truststore certifi cryptography
           python packaging/build_exe.py desktop
 
       - name: Smoke-test the app (opens its window, renders, closes, exits)
@@ -143,6 +161,12 @@ jobs:
           [ "$code" = 0 ] || exit 1
           sleep 2
           if curl -s --max-time 3 http://127.0.0.1:8765/ >/dev/null; then echo "::error::server still running"; exit 1; fi
+
+      - name: Test the background notification check (launchd agent and --notify run)
+        run: |
+          python -c "from finorganizer import schedule; open('$RUNNER_TEMP/agent.plist', 'wb').write(schedule.plist_bytes(['$PWD/dist/FinOrganizer.app/Contents/MacOS/FinOrganizer', '--notify', '--db', '$RUNNER_TEMP/notify.db'], '$RUNNER_TEMP'))"
+          plutil -lint "$RUNNER_TEMP/agent.plist"
+          dist/FinOrganizer.app/Contents/MacOS/FinOrganizer --notify --db "$RUNNER_TEMP/notify.db"
 
       - name: Make .dmg
         run: |
