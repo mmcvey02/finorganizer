@@ -34,7 +34,8 @@ def command(db_path):
 
 def _run(cmd):
     kw = {"creationflags": 0x08000000} if os.name == "nt" else {}  # no console window flash
-    return subprocess.run(cmd, capture_output=True, text=True, **kw)
+    # The packaged app has no console, so give the tool an empty input rather than none.
+    return subprocess.run(cmd, capture_output=True, text=True, stdin=subprocess.DEVNULL, **kw)
 
 
 # ------------------------------------------------------------------- Windows
@@ -146,4 +147,9 @@ def status():
         return {"supported": False, "installed": False,
                 "reason": "Background checks run in the installed FinOrganizer app for Windows or Mac. "
                           "Here, checks run only while FinOrganizer is open."}
-    return {"supported": True, "installed": installed(), "every_hours": INTERVAL_HOURS}
+    try:
+        is_installed = installed()
+    except OSError as err:  # couldn't ask Task Scheduler / launchd: still show the settings
+        return {"supported": True, "installed": False, "every_hours": INTERVAL_HOURS,
+                "error": "couldn't check the background task: %s" % err}
+    return {"supported": True, "installed": is_installed, "every_hours": INTERVAL_HOURS}

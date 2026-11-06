@@ -288,7 +288,7 @@ def build_router(app=None):
     # notifications (per profile)
     def notifications_state(c):
         state = notify.public_state(c)
-        state["background"]["error"] = getattr(app, "schedule_error", None) if app else None
+        state["background"]["error"] = (getattr(app, "schedule_error", None) if app else None) or state["background"].get("error")
         return state
 
     def update_notifications(c, q, b):

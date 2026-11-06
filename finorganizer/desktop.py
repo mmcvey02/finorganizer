@@ -175,6 +175,25 @@ def run(db_path=None, smoke_test=False):
                 outcome["ok"] = True
                 break
             time.sleep(0.5)
+        # Settings must show the Notifications section (it talks to the background-check
+        # tools, which only exist in the packaged app).
+        notify_seen = "not checked"
+        if ready:
+            window.evaluate_js("location.hash = '#settings'")
+            notify_seen = "missing"
+            for _ in range(40):
+                try:
+                    found = window.evaluate_js(
+                        "document.querySelector('#notify-card') ? 'ok' : "
+                        "((document.querySelector('#notify-section') || {}).textContent || '')")
+                except Exception:
+                    found = ""
+                if found == "ok" or (found and "Notifications" in found):
+                    notify_seen = found if found == "ok" else "error: " + found.strip()[:300]
+                    break
+                time.sleep(0.5)
+            if notify_seen != "ok":
+                outcome["ok"] = False
         # A packaged app must also be able to make verified HTTPS connections (bank sync,
         # updates). Rate limits or outages don't fail the check; certificate errors do.
         from . import net
@@ -189,8 +208,8 @@ def run(db_path=None, smoke_test=False):
             outcome["ok"] = False
         try:
             with open(_log_path(db_path), "a", encoding="utf-8") as f:
-                f.write("smoke test: window %s; HTTPS via %s: %s; iPhone notifications: %s\n" % (
-                    "rendered" if ready else "did not render", net.SOURCE,
+                f.write("smoke test: window %s; Settings > Notifications: %s; HTTPS via %s: %s; iPhone notifications: %s\n" % (
+                    "rendered" if ready else "did not render", notify_seen, net.SOURCE,
                     "FAILED: " + info["error"] if tls_broken else
                     ("ok (latest release %s)" % info["latest"] if not info["error"] else
                      "not verified (%s)" % info["error"]),
