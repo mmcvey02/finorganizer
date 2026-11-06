@@ -194,7 +194,7 @@ def run(db_path=None, smoke_test=False):
                     "FAILED: " + info["error"] if tls_broken else
                     ("ok (latest release %s)" % info["latest"] if not info["error"] else
                      "not verified (%s)" % info["error"]),
-                    "ok" if push_ok else "FAILED (cryptography not bundled)"))
+                    "ok" if push_ok else "FAILED (cryptography didn't load: %s)" % webpush.load_error))
         except OSError:
             pass
         window.destroy()

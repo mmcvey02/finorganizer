@@ -155,7 +155,7 @@ jobs:
           pid=$!
           for i in $(seq 1 120); do kill -0 $pid 2>/dev/null || break; sleep 1; done
           if kill -0 $pid 2>/dev/null; then kill -9 $pid; echo "::error::app did not exit"; exit 1; fi
-          wait $pid; code=$?
+          code=0; wait $pid || code=$?
           echo "app exit code: $code"
           cat "$RUNNER_TEMP/finorganizer-desktop.log" || { echo "::error::smoke test wrote no log"; exit 1; }
           [ "$code" = 0 ] || exit 1

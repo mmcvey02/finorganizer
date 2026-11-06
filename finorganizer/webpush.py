@@ -39,20 +39,21 @@ class PushError(Exception):
 
 
 _available = None
+load_error = ""  # why cryptography didn't load, for diagnostics
 
 
 def available():
     """Whether the cryptography package is installed and actually loads (a broken install
     can fail with errors that aren't ImportError). Checked once."""
-    global _available
+    global _available, load_error
     if _available is None:
         try:
             from cryptography.hazmat.primitives.asymmetric import ec
             _available = ec.SECP256R1 is not None
         except (KeyboardInterrupt, SystemExit):
             raise
-        except BaseException:
-            _available = False
+        except BaseException as err:
+            _available, load_error = False, "%s: %s" % (type(err).__name__, err)
     return _available
 
 
